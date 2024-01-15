@@ -284,10 +284,12 @@ func (c *Controller) sync(key string) (retErr error) {
 	}
 
 	oldMetaSet, err := appspub.GetRuntimeContainerMetaSet(pod)
+	klog.Infof("Get old runtime meta from Pod %s/%s: %v", namespace, name, util.DumpJSON(oldMetaSet))
 	if err != nil {
 		klog.Warningf("Failed to get old runtime meta from Pod %s/%s: %v", namespace, name, err)
 	}
 	newMetaSet := c.manageContainerMetaSet(pod, kubePodStatus, oldMetaSet, criRuntime)
+	klog.Infof("Get new runtime meta from Pod %s/%s: %v", namespace, name, util.DumpJSON(newMetaSet))
 
 	return c.reportContainerMetaSet(pod, oldMetaSet, newMetaSet)
 }
