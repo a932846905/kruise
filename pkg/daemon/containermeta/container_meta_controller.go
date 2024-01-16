@@ -283,6 +283,8 @@ func (c *Controller) sync(key string) (retErr error) {
 		return fmt.Errorf("failed to GetPodStatus: %v", err)
 	}
 
+	klog.Infof("Get Pod %s/%s status from kubeRuntime: %v", namespace, name, util.DumpJSON(kubePodStatus))
+
 	oldMetaSet, err := appspub.GetRuntimeContainerMetaSet(pod)
 	klog.Infof("Get old runtime meta from Pod %s/%s: %v", namespace, name, util.DumpJSON(oldMetaSet))
 	if err != nil {
