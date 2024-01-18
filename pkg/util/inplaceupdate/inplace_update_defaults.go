@@ -461,6 +461,8 @@ func checkAllContainersHashConsistent(pod *v1.Pod, runtimeContainerMetaSet *apps
 					containerSpec.Name, pod.Namespace, pod.Name, containerSpec)
 				return false
 			}
+			klog.Infof("Find container %s in runtime-container-meta for Pod %s/%s has same plain hash %s/%s with spec %v",
+				containerSpec.Name, pod.Namespace, pod.Name, containerMeta.Hashes.PlainHash, kubeletcontainer.HashContainer(containerSpec), containerSpec)
 		case extractedEnvFromMetadataHash:
 			hasher := utilcontainermeta.NewEnvFromMetadataHasher()
 			if expectedHash := hasher.GetExpectHash(containerSpec, pod); containerMeta.Hashes.ExtractedEnvFromMetadataHash != expectedHash {
