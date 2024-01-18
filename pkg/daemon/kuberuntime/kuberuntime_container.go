@@ -74,6 +74,7 @@ func (m *genericRuntimeManager) getPodContainerStatuses(uid types.UID, name, nam
 		if err != nil {
 			return nil, fmt.Errorf("run ContainerStatus for %s error: %v", c.Id, err)
 		}
+		klog.Infof("ContainerStatus for %s: %+v", c.Id, status)
 		cStatus := toKubeContainerStatus(status.Status, m.runtimeName)
 		// TODO: Populate the termination message if needed.
 		statuses[i] = cStatus
