@@ -19,6 +19,7 @@ package utils
 import (
 	"context"
 	"fmt"
+	"k8s.io/klog/v2"
 	"math"
 	"sort"
 	"strconv"
@@ -54,6 +55,7 @@ func (s ActivePodsWithRanks) Len() int      { return len(s.Pods) }
 func (s ActivePodsWithRanks) Swap(i, j int) { s.Pods[i], s.Pods[j] = s.Pods[j], s.Pods[i] }
 
 func (s ActivePodsWithRanks) Less(i, j int) bool {
+	klog.Infof("begin compare pod: %s, %s", s.Pods[i].Name, s.Pods[j].Name)
 	// 1. Unassigned < assigned
 	// If only one of the pods is unassigned, the unassigned one is smaller
 	if s.Pods[i].Spec.NodeName != s.Pods[j].Spec.NodeName && (len(s.Pods[i].Spec.NodeName) == 0 || len(s.Pods[j].Spec.NodeName) == 0) {
@@ -62,16 +64,19 @@ func (s ActivePodsWithRanks) Less(i, j int) bool {
 	// 2. PodPending < PodUnknown < PodRunning
 	podPhaseToOrdinal := map[v1.PodPhase]int{v1.PodPending: 0, v1.PodUnknown: 1, v1.PodRunning: 2}
 	if podPhaseToOrdinal[s.Pods[i].Status.Phase] != podPhaseToOrdinal[s.Pods[j].Status.Phase] {
+		klog.Infof("pod phase: %s, %s", s.Pods[i].Status.Phase, s.Pods[j].Status.Phase)
 		return podPhaseToOrdinal[s.Pods[i].Status.Phase] < podPhaseToOrdinal[s.Pods[j].Status.Phase]
 	}
 	// 3. Not available < available; Not ready < ready
 	// If only one of the pods is not ready, the not ready one is smaller
 	if s.AvailableFunc != nil {
 		if s.AvailableFunc(s.Pods[i]) != s.AvailableFunc(s.Pods[j]) {
+			klog.Infof("pod available: %t, %t", s.AvailableFunc(s.Pods[i]), s.AvailableFunc(s.Pods[j]))
 			return !s.AvailableFunc(s.Pods[i])
 		}
 	}
 	if podutil.IsPodReady(s.Pods[i]) != podutil.IsPodReady(s.Pods[j]) {
+		klog.Infof("pod ready: %t, %t", podutil.IsPodReady(s.Pods[i]), podutil.IsPodReady(s.Pods[j]))
 		return !podutil.IsPodReady(s.Pods[i])
 	}
 
@@ -79,6 +84,7 @@ func (s ActivePodsWithRanks) Less(i, j int) bool {
 	pi, _ := getDeletionCostFromPodAnnotations(s.Pods[i].Annotations)
 	pj, _ := getDeletionCostFromPodAnnotations(s.Pods[j].Annotations)
 	if pi != pj {
+		klog.Infof("pod deletion cost: %d, %d", pi, pj)
 		return pi < pj
 	}
 
@@ -89,6 +95,7 @@ func (s ActivePodsWithRanks) Less(i, j int) bool {
 		rankJ = s.Ranker.GetRank(s.Pods[j])
 	}
 	if rankI != rankJ {
+		klog.Infof("pod rank: %f, %f", rankI, rankJ)
 		return rankI > rankJ
 	}
 
@@ -100,15 +107,18 @@ func (s ActivePodsWithRanks) Less(i, j int) bool {
 		readyTime1 := podReadyTime(s.Pods[i])
 		readyTime2 := podReadyTime(s.Pods[j])
 		if !readyTime1.Equal(readyTime2) {
+			klog.Infof("pod ready time: %s, %s", readyTime1, readyTime2)
 			return afterOrZero(readyTime1, readyTime2)
 		}
 	}
 	// 7. Pods with containers with higher restart counts < lower restart counts
 	if maxContainerRestarts(s.Pods[i]) != maxContainerRestarts(s.Pods[j]) {
+		klog.Infof("pod restart count: %d, %d", maxContainerRestarts(s.Pods[i]), maxContainerRestarts(s.Pods[j]))
 		return maxContainerRestarts(s.Pods[i]) > maxContainerRestarts(s.Pods[j])
 	}
 	// 8. Empty creation time pods < newer pods < older pods
 	if !s.Pods[i].CreationTimestamp.Equal(&s.Pods[j].CreationTimestamp) {
+		klog.Infof("pod creation time: %s, %s", s.Pods[i].CreationTimestamp, s.Pods[j].CreationTimestamp)
 		return afterOrZero(&s.Pods[i].CreationTimestamp, &s.Pods[j].CreationTimestamp)
 	}
 	return false
