@@ -286,6 +286,7 @@ func defaultCalculateInPlaceUpdateSpec(oldRevision, newRevision *apps.Controller
 				if len(words) != 4 && words[2] != "labels" && words[2] != "annotations" {
 					continue
 				}
+				klog.Infof("metadata patch: %v", op)
 				key := rfc6901Decoder.Replace(words[3])
 
 				for i := range newTemp.Spec.Containers {
