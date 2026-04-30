@@ -74,7 +74,7 @@ func (h *ConfigMapSetCreateUpdateHandler) validateConfigMapSetSpec(ctx context.C
 		return field.Required(fldPath.Child("selector"), "selector is required")
 	}
 
-	if spec.Selector.MatchLabels == nil || len(spec.Selector.MatchLabels) == 0 {
+	if len(spec.Selector.MatchLabels) == 0 {
 		return field.Required(fldPath.Child("selector", "matchLabels"), "")
 	}
 
