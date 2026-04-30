@@ -486,13 +486,13 @@ func getDistributionByPartition(cms *appsv1alpha1.ConfigMapSet, pods []*corev1.P
 	return distributions, nil
 }
 
-func getUpdateInfoByDistribution(distributions []Distribution, pods []*corev1.Pod, revisionKeys *RevisionKeys) (*UpdateInfo, error) {
+func getUpdateInfoByDistribution(cms *appsv1alpha1.ConfigMapSet, distributions []Distribution, pods []*corev1.Pod, revisionKeys *RevisionKeys) (*UpdateInfo, error) {
 	// 收集待更新 pod（多余版本 -> 目标版本）
 	var podsToUpdate []*corev1.Pod
 	targetRevisions := make([]string, 0)
 	targetCustomVersions := make([]string, 0)
 
-	podsToUpdate, targetRevisions, targetCustomVersions = getUpdatePodsByDistributions(distributions, pods, revisionKeys)
+	podsToUpdate, targetRevisions, targetCustomVersions = getUpdatePodsByDistributions(cms, distributions, pods, revisionKeys)
 	return &UpdateInfo{
 		PodsToUpdate:         podsToUpdate,
 		TargetRevisions:      targetRevisions,
@@ -500,7 +500,7 @@ func getUpdateInfoByDistribution(distributions []Distribution, pods []*corev1.Po
 	}, nil
 }
 
-func getUpdatePodsByDistributions(distributions []Distribution, pods []*v1.Pod, revisionKeys *RevisionKeys) ([]*v1.Pod, []string, []string) {
+func getUpdatePodsByDistributions(cms *appsv1alpha1.ConfigMapSet, distributions []Distribution, pods []*v1.Pod, revisionKeys *RevisionKeys) ([]*v1.Pod, []string, []string) {
 	updateDistribution := distributions[0]
 	currentDistribution := distributions[1]
 
@@ -509,11 +509,37 @@ func getUpdatePodsByDistributions(distributions []Distribution, pods []*v1.Pod, 
 	var targetRevisions []string
 	var targetCustomVersions []string
 
-	// Filter pods that don't have the enabled annotation
+	// Filter pods that don't have the enabled annotation and count unavailable pods
+	var currentUnavailableCount int32 = 0
 	for _, pod := range pods {
 		if pod.Annotations != nil && pod.Annotations[GetConfigMapSetEnabledKey()] == "true" {
 			validPods = append(validPods, pod)
+			if !IsPodReady(pod) {
+				currentUnavailableCount++
+			}
 		}
+	}
+
+	// Calculate maxUnavailable quota
+	var maxUnavailableQuota int32 = math.MaxInt32 // Default to unlimited if not set
+	if cms.Spec.UpdateStrategy.MaxUnavailable != nil {
+		totalValidPods := len(validPods)
+		maxUnavailableStr := cms.Spec.UpdateStrategy.MaxUnavailable.String()
+		if strings.HasSuffix(maxUnavailableStr, "%") {
+			percentStr := strings.TrimSuffix(maxUnavailableStr, "%")
+			if percent, err := strconv.Atoi(percentStr); err == nil && percent >= 0 && percent <= 100 {
+				maxUnavailableQuota = int32(math.Ceil(float64(percent) / 100.0 * float64(totalValidPods)))
+			}
+		} else if count, err := strconv.Atoi(maxUnavailableStr); err == nil && count >= 0 {
+			maxUnavailableQuota = int32(count)
+		}
+	}
+
+	// The actual quota allowed for this reconcile round
+	allowedUpdateQuota := maxUnavailableQuota - currentUnavailableCount
+	if allowedUpdateQuota <= 0 && maxUnavailableQuota != math.MaxInt32 {
+		klog.Infof("ConfigMapSet %s/%s maxUnavailable limit reached (current unavailable: %d, max allowed: %d), no more pods will be updated in this round", cms.Namespace, cms.Name, currentUnavailableCount, maxUnavailableQuota)
+		return podsToUpdate, targetRevisions, targetCustomVersions
 	}
 
 	// Calculate how many pods are currently at the update revision
@@ -777,7 +803,7 @@ func (r *ReconcileConfigMapSet) getReloadSidecarName(ctx context.Context, cms *a
 }
 
 func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *appsv1alpha1.ConfigMapSet, distributions []Distribution, pods []*corev1.Pod, revisionKeys *RevisionKeys) (bool, error) {
-	updateInfo, err := getUpdateInfoByDistribution(distributions, pods, revisionKeys)
+	updateInfo, err := getUpdateInfoByDistribution(cms, distributions, pods, revisionKeys)
 	if err != nil {
 		klog.Errorf("failed to fetch update info: %v", err)
 		return false, err
