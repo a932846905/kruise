@@ -753,7 +753,7 @@ func (r *ReconcileConfigMapSet) getReloadSidecarName(ctx context.Context, cms *a
 			expectedSidecarName = cms.Spec.ReloadSidecarConfig.Config.Name
 		} else if cms.Spec.ReloadSidecarConfig.Type == appsv1alpha1.SidecarSetReloadSidecarType && cms.Spec.ReloadSidecarConfig.Config != nil && cms.Spec.ReloadSidecarConfig.Config.SidecarSetRef != nil {
 			expectedSidecarName = cms.Spec.ReloadSidecarConfig.Config.SidecarSetRef.ContainerName
-		} else if cms.Spec.ReloadSidecarConfig.Type == appsv1alpha1.CustomerReloadSidecarType {
+		} else if cms.Spec.ReloadSidecarConfig.Type == appsv1alpha1.CustomReloadSidecarType {
 			if cms.Spec.ReloadSidecarConfig.Config != nil && cms.Spec.ReloadSidecarConfig.Config.ConfigMapRef != nil {
 				cmRef := cms.Spec.ReloadSidecarConfig.Config.ConfigMapRef
 				customerCM := &corev1.ConfigMap{}

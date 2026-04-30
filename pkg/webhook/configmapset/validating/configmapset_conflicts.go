@@ -76,7 +76,7 @@ func (h *ConfigMapSetCreateUpdateHandler) getReloadSidecarName(ctx context.Conte
 		if config.SidecarSetRef != nil {
 			return config.SidecarSetRef.ContainerName, nil
 		}
-	case appsv1alpha1.CustomerReloadSidecarType:
+	case appsv1alpha1.CustomReloadSidecarType:
 		if config.ConfigMapRef != nil {
 			cmNamespace := config.ConfigMapRef.Namespace
 			if cmNamespace == "" {

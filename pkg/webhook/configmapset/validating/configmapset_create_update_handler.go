@@ -144,6 +144,27 @@ func (h *ConfigMapSetCreateUpdateHandler) validateConfigMapSetSpec(ctx context.C
 			"invalid maxUnavailable value")
 	}
 
+	// Validate EffectPolicy
+	if spec.EffectPolicy != nil {
+		effectPath := fldPath.Child("effectPolicy")
+		switch spec.EffectPolicy.Type {
+		case appsv1alpha1.ReStartEffectPolicyType, appsv1alpha1.HotUpdateEffectPolicyType:
+			// Valid types that don't strictly require PostHook config
+		case appsv1alpha1.PostHookEffectPolicyType:
+			if spec.EffectPolicy.PostHook == nil {
+				return field.Required(effectPath.Child("postHook"), "postHook must be specified when type is PostHook")
+			}
+			if spec.EffectPolicy.PostHook.HTTPGet == nil && spec.EffectPolicy.PostHook.TCPSocket == nil {
+				return field.Required(effectPath.Child("postHook"), "either httpGet or tcpSocket must be specified for PostHook")
+			}
+			if spec.EffectPolicy.PostHook.HTTPGet != nil && spec.EffectPolicy.PostHook.TCPSocket != nil {
+				return field.Invalid(effectPath.Child("postHook"), "", "cannot specify both httpGet and tcpSocket")
+			}
+		default:
+			return field.Invalid(effectPath.Child("type"), spec.EffectPolicy.Type, "invalid effect policy type")
+		}
+	}
+
 	// validate ReloadSidecarConfig
 	if spec.ReloadSidecarConfig != nil {
 		reloadConfigPath := fldPath.Child("reloadSidecarConfig")
@@ -212,9 +233,9 @@ func (h *ConfigMapSetCreateUpdateHandler) validateConfigMapSetSpec(ctx context.C
 					return field.Invalid(reloadConfigPath.Child("config", "sidecarSetRef", "name"), sidecarSetRef.Name, "ConfigMapSet MatchLabels do not satisfy SidecarSet selector")
 				}
 			}
-		} else if spec.ReloadSidecarConfig.Type == appsv1alpha1.CustomerReloadSidecarType {
+		} else if spec.ReloadSidecarConfig.Type == appsv1alpha1.CustomReloadSidecarType {
 			if spec.ReloadSidecarConfig.Config == nil || spec.ReloadSidecarConfig.Config.ConfigMapRef == nil {
-				return field.Invalid(reloadConfigPath.Child("config", "configMapRef"), "", "configMapRef must be set when type is customer")
+				return field.Invalid(reloadConfigPath.Child("config", "configMapRef"), "", "configMapRef must be set when type is custom")
 			}
 			cmRef := spec.ReloadSidecarConfig.Config.ConfigMapRef
 			customerCM := &corev1.ConfigMap{}
@@ -226,15 +247,15 @@ func (h *ConfigMapSetCreateUpdateHandler) validateConfigMapSetSpec(ctx context.C
 			err = h.Client.Get(ctx, types.NamespacedName{Name: cmRef.Name, Namespace: cmRefNamespace}, customerCM)
 			if err != nil {
 				if errors.IsNotFound(err) {
-					return field.Invalid(reloadConfigPath.Child("config", "configMapRef", "name"), cmRef.Name, "customer sidecar ConfigMap not found")
+					return field.Invalid(reloadConfigPath.Child("config", "configMapRef", "name"), cmRef.Name, "custom sidecar ConfigMap not found")
 				}
-				return field.InternalError(reloadConfigPath.Child("config", "configMapRef", "name"), fmt.Errorf("failed to get customer sidecar ConfigMap: %v", err))
+				return field.InternalError(reloadConfigPath.Child("config", "configMapRef", "name"), fmt.Errorf("failed to get custom sidecar ConfigMap: %v", err))
 			}
 
 			// Validate if the specific key "reload-sidecar" exists and can be unmarshaled into a valid Container
 			containerData, exists := customerCM.Data["reload-sidecar"]
 			if !exists {
-				return field.Invalid(reloadConfigPath.Child("config", "configMapRef", "name"), cmRef.Name, "customer sidecar ConfigMap must contain key 'reload-sidecar'")
+				return field.Invalid(reloadConfigPath.Child("config", "configMapRef", "name"), cmRef.Name, "custom sidecar ConfigMap must contain key 'reload-sidecar'")
 			}
 
 			var reloadSidecar corev1.Container
@@ -246,7 +267,7 @@ func (h *ConfigMapSetCreateUpdateHandler) validateConfigMapSetSpec(ctx context.C
 				return field.Invalid(reloadConfigPath.Child("config", "configMapRef", "name"), cmRef.Name, "container defined in 'reload-sidecar' must have image specified")
 			}
 		} else {
-			return field.Invalid(reloadConfigPath.Child("type"), spec.ReloadSidecarConfig.Type, "invalid type, must be k8s-config, SidecarSet or customer")
+			return field.Invalid(reloadConfigPath.Child("type"), spec.ReloadSidecarConfig.Type, "invalid type, must be k8s, sidecarset or custom")
 		}
 	}
 

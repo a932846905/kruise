@@ -232,7 +232,7 @@ func (h *PodCreateHandler) injectSidecar4Pod(ctx context.Context, pod *corev1.Po
 					reloadSidecar.RestartPolicy = &cms.Spec.ReloadSidecarConfig.Config.RestartPolicy
 				}
 			}
-		} else if cms.Spec.ReloadSidecarConfig.Type == appsv1alpha1.CustomerReloadSidecarType {
+		} else if cms.Spec.ReloadSidecarConfig.Type == appsv1alpha1.CustomReloadSidecarType {
 			if cms.Spec.ReloadSidecarConfig.Config != nil && cms.Spec.ReloadSidecarConfig.Config.ConfigMapRef != nil {
 				cmRef := cms.Spec.ReloadSidecarConfig.Config.ConfigMapRef
 				customerCM := &corev1.ConfigMap{}
@@ -241,15 +241,15 @@ func (h *PodCreateHandler) injectSidecar4Pod(ctx context.Context, pod *corev1.Po
 					cmNamespace = cms.Namespace
 				}
 				if err := h.Client.Get(ctx, types.NamespacedName{Name: cmRef.Name, Namespace: cmNamespace}, customerCM); err != nil {
-					klog.Errorf("failed to get customer sidecar configmap %s/%s: %v", cmNamespace, cmRef.Name, err)
+					klog.Errorf("failed to get custom sidecar configmap %s/%s: %v", cmNamespace, cmRef.Name, err)
 					return err
 				}
 				if _, exists := customerCM.Data["reload-sidecar"]; !exists {
-					klog.Errorf("customer sidecar configmap %s/%s missing key 'reload-sidecar'", cmNamespace, cmRef.Name)
-					return fmt.Errorf("customer sidecar configmap %s/%s missing", cmNamespace, cmRef.Name)
+					klog.Errorf("custom sidecar configmap %s/%s missing key 'reload-sidecar'", cmNamespace, cmRef.Name)
+					return fmt.Errorf("custom sidecar configmap %s/%s missing key 'reload-sidecar'", cmNamespace, cmRef.Name)
 				}
 				if unmarshalErr := json.Unmarshal([]byte(customerCM.Data["reload-sidecar"]), &reloadSidecar); unmarshalErr != nil {
-					klog.Errorf("failed to unmarshal customer sidecar configmap %s/%s data 'reload-sidecar': %v", cmNamespace, cmRef.Name, unmarshalErr)
+					klog.Errorf("failed to unmarshal custom sidecar configmap %s/%s data 'reload-sidecar': %v", cmNamespace, cmRef.Name, unmarshalErr)
 					return unmarshalErr
 				}
 			}
@@ -582,7 +582,7 @@ func (h *PodCreateHandler) getReloadSidecarName(ctx context.Context, cms *appsv1
 		if config.SidecarSetRef != nil {
 			return config.SidecarSetRef.ContainerName, nil
 		}
-	case appsv1alpha1.CustomerReloadSidecarType:
+	case appsv1alpha1.CustomReloadSidecarType:
 		if config.ConfigMapRef != nil {
 			cmNamespace := config.ConfigMapRef.Namespace
 			if cmNamespace == "" {

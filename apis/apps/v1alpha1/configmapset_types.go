@@ -52,8 +52,8 @@ const (
 	K8sConfigReloadSidecarType ReloadSidecarType = "k8s"
 	// SidecarSetReloadSidecarType 引用外部的SidecarSet
 	SidecarSetReloadSidecarType ReloadSidecarType = "sidecarset"
-	// CustomerReloadSidecarType 引用自定义ConfigMap
-	CustomerReloadSidecarType ReloadSidecarType = "custom"
+	// CustomReloadSidecarType 引用自定义ConfigMap
+	CustomReloadSidecarType ReloadSidecarType = "custom"
 )
 
 type ReloadSidecarConfig struct {
