@@ -23,13 +23,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	kubecontroller "k8s.io/kubernetes/pkg/controller"
 	"math"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	kubecontroller "k8s.io/kubernetes/pkg/controller"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -483,6 +484,12 @@ func (h *PodCreateHandler) configMapSetMutatingPod(ctx context.Context, req admi
 		return true, nil
 	}
 
+	// Check for conflicts among matched ConfigMapSets
+	if err := h.checkConfigMapSetConflicts(ctx, pod, cmsList); err != nil {
+		klog.Errorf("ConfigMapSet conflict for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+		return false, err
+	}
+
 	copyPod := pod.DeepCopy()
 	// sort by cms name, for inject Pod stable
 	sort.Slice(cmsList, func(i, j int) bool {
@@ -518,6 +525,82 @@ func (h *PodCreateHandler) configMapSetMutatingPod(ctx context.Context, req admi
 	}
 
 	return false, nil
+}
+
+func (h *PodCreateHandler) checkConfigMapSetConflicts(ctx context.Context, pod *corev1.Pod, cmsList []*appsv1alpha1.ConfigMapSet) error {
+	if len(cmsList) <= 1 {
+		return nil
+	}
+
+	sidecarNames := make(map[string]string)
+	mountPaths := make(map[string]map[string]string)
+
+	for _, cms := range cmsList {
+		// 1. Check for reload-sidecar name conflicts
+		sidecarName, err := h.getReloadSidecarName(ctx, cms)
+		if err != nil {
+			return err
+		}
+		if sidecarName != "" {
+			if existingCmsName, exists := sidecarNames[sidecarName]; exists {
+				return fmt.Errorf("ConfigMapSet conflict: both %s and %s attempt to inject reload-sidecar with the same name '%s' into pod %s", existingCmsName, cms.Name, sidecarName, pod.Name)
+			}
+			sidecarNames[sidecarName] = cms.Name
+		}
+
+		// 2. Check for container mount path conflicts
+		for _, c := range cms.Spec.Containers {
+			targetContainerName := configmapset.GetContainerName(pod, c)
+			if targetContainerName == "" {
+				continue
+			}
+			if mountPaths[targetContainerName] == nil {
+				mountPaths[targetContainerName] = make(map[string]string)
+			}
+			if existingCmsName, exists := mountPaths[targetContainerName][c.MountPath]; exists {
+				return fmt.Errorf("ConfigMapSet conflict: both %s and %s attempt to mount to '%s' on container '%s' in pod %s", existingCmsName, cms.Name, c.MountPath, targetContainerName, pod.Name)
+			}
+			mountPaths[targetContainerName][c.MountPath] = cms.Name
+		}
+	}
+
+	return nil
+}
+
+func (h *PodCreateHandler) getReloadSidecarName(ctx context.Context, cms *appsv1alpha1.ConfigMapSet) (string, error) {
+	if cms.Spec.ReloadSidecarConfig == nil || cms.Spec.ReloadSidecarConfig.Config == nil {
+		return configmapset.GetConfigMapSetDefaultSidecarName(cms.Name), nil
+	}
+
+	config := cms.Spec.ReloadSidecarConfig.Config
+	switch cms.Spec.ReloadSidecarConfig.Type {
+	case appsv1alpha1.K8sConfigReloadSidecarType:
+		if config.Name != "" {
+			return config.Name, nil
+		}
+	case appsv1alpha1.SidecarSetReloadSidecarType:
+		if config.SidecarSetRef != nil {
+			return config.SidecarSetRef.ContainerName, nil
+		}
+	case appsv1alpha1.CustomerReloadSidecarType:
+		if config.ConfigMapRef != nil {
+			cmNamespace := config.ConfigMapRef.Namespace
+			if cmNamespace == "" {
+				cmNamespace = cms.Namespace
+			}
+			customerCM := &corev1.ConfigMap{}
+			if err := h.Client.Get(ctx, types.NamespacedName{Name: config.ConfigMapRef.Name, Namespace: cmNamespace}, customerCM); err != nil {
+				return "", fmt.Errorf("failed to get customer sidecar configmap: %v", err)
+			}
+			if containerData, exists := customerCM.Data["reload-sidecar"]; exists {
+				var container corev1.Container
+				if err := json.Unmarshal([]byte(containerData), &container); err == nil && container.Name != "" {
+					return container.Name, nil
+				}
+			}
+		}
+	}
+	return configmapset.GetConfigMapSetDefaultSidecarName(cms.Name), nil
 }
 
 func (h *PodCreateHandler) handlePodRevisionAnnotations(ctx context.Context, pod *corev1.Pod, cms *appsv1alpha1.ConfigMapSet) error {

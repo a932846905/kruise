@@ -362,6 +362,11 @@ func (h *ConfigMapSetCreateUpdateHandler) Handle(ctx context.Context, req admiss
 		if allErrs := h.validateConfigMapSet(ctx, obj); len(allErrs) > 0 {
 			return admission.Errored(http.StatusUnprocessableEntity, allErrs.ToAggregate())
 		}
+
+		// Layer 2: Defensive check against existing ConfigMapSets
+		if err := h.checkConflictsWithExistingConfigMapSets(ctx, obj); err != nil {
+			return admission.Errored(http.StatusConflict, err)
+		}
 	case admissionv1.Delete:
 		if len(req.OldObject.Raw) == 0 {
 			klog.InfoS("Skip to validate CloneSet %s/%s deletion for no old object, maybe because of Kubernetes version < 1.16", "namespace", req.Namespace, "name", req.Name)
