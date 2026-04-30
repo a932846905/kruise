@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	kubecontroller "k8s.io/kubernetes/pkg/controller"
 	"math"
 	"net/http"
 	"sort"
@@ -40,7 +41,6 @@ import (
 
 	"github.com/openkruise/kruise/apis/apps/pub"
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
-	"github.com/openkruise/kruise/pkg/control/sidecarcontrol"
 	"github.com/openkruise/kruise/pkg/controller/configmapset"
 	"github.com/openkruise/kruise/pkg/features"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
@@ -464,7 +464,7 @@ func (h *PodCreateHandler) configMapSetMutatingPod(ctx context.Context, req admi
 		return true, nil
 	}
 
-	if !sidecarcontrol.IsActivePod(pod) {
+	if !kubecontroller.IsPodActive(pod) {
 		return true, nil
 	}
 
