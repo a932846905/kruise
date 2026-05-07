@@ -148,9 +148,9 @@ func (h *ConfigMapSetCreateUpdateHandler) validateConfigMapSetSpec(ctx context.C
 	if spec.EffectPolicy != nil {
 		effectPath := fldPath.Child("effectPolicy")
 		switch spec.EffectPolicy.Type {
-		case appsv1alpha1.ReStartEffectPolicyType, appsv1alpha1.HotUpdateEffectPolicyType:
+		case appsv1alpha1.EffectPolicyTypeReStart, appsv1alpha1.EffectPolicyTypeHotUpdate:
 			// Valid types that don't strictly require PostHook config
-		case appsv1alpha1.PostHookEffectPolicyType:
+		case appsv1alpha1.EffectPolicyTypePostHook:
 			if spec.EffectPolicy.PostHook == nil {
 				return field.Required(effectPath.Child("postHook"), "postHook must be specified when type is PostHook")
 			}
@@ -168,11 +168,11 @@ func (h *ConfigMapSetCreateUpdateHandler) validateConfigMapSetSpec(ctx context.C
 	// validate ReloadSidecarConfig
 	if spec.ReloadSidecarConfig != nil {
 		reloadConfigPath := fldPath.Child("reloadSidecarConfig")
-		if spec.ReloadSidecarConfig.Type == appsv1alpha1.K8sConfigReloadSidecarType {
+		if spec.ReloadSidecarConfig.Type == appsv1alpha1.ReloadSidecarTypeK8s {
 			if spec.ReloadSidecarConfig.Config == nil || spec.ReloadSidecarConfig.Config.Name == "" {
 				return field.Invalid(reloadConfigPath.Child("config", "name"), "", "name must be set when type is k8s-config")
 			}
-		} else if spec.ReloadSidecarConfig.Type == appsv1alpha1.SidecarSetReloadSidecarType {
+		} else if spec.ReloadSidecarConfig.Type == appsv1alpha1.ReloadSidecarTypeSidecarSet {
 			if spec.ReloadSidecarConfig.Config == nil || spec.ReloadSidecarConfig.Config.SidecarSetRef == nil {
 				return field.Invalid(reloadConfigPath.Child("config", "sidecarSetRef"), "", "sidecarSetRef must be set when type is SidecarSet")
 			}
@@ -233,7 +233,7 @@ func (h *ConfigMapSetCreateUpdateHandler) validateConfigMapSetSpec(ctx context.C
 					return field.Invalid(reloadConfigPath.Child("config", "sidecarSetRef", "name"), sidecarSetRef.Name, "ConfigMapSet MatchLabels do not satisfy SidecarSet selector")
 				}
 			}
-		} else if spec.ReloadSidecarConfig.Type == appsv1alpha1.CustomReloadSidecarType {
+		} else if spec.ReloadSidecarConfig.Type == appsv1alpha1.ReloadSidecarTypeCustom {
 			if spec.ReloadSidecarConfig.Config == nil || spec.ReloadSidecarConfig.Config.ConfigMapRef == nil {
 				return field.Invalid(reloadConfigPath.Child("config", "configMapRef"), "", "configMapRef must be set when type is custom")
 			}

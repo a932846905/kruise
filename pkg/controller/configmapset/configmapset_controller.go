@@ -85,13 +85,13 @@ type RevisionKeys struct {
 }
 
 type SpecForHash struct {
-	CustomVersion        string                             `json:"customVersion,omitempty"`
-	Selector             *metav1.LabelSelector              `json:"selector"`
-	Data                 map[string]string                  `json:"data"`
-	Containers           []appsv1alpha1.ContainerInjectSpec `json:"containers"`
-	ReloadSidecarConfig  *appsv1alpha1.ReloadSidecarConfig  `json:"reloadSidecarConfig,omitempty"`
-	EffectPolicy         *appsv1alpha1.EffectPolicy         `json:"effectPolicy,omitempty"`
-	RevisionHistoryLimit *int32                             `json:"revisionHistoryLimit,omitempty"`
+	CustomVersion        string                               `json:"customVersion,omitempty"`
+	Selector             *metav1.LabelSelector                `json:"selector"`
+	Data                 map[string]string                    `json:"data"`
+	Containers           []appsv1alpha1.ConfigMapSetContainer `json:"containers"`
+	ReloadSidecarConfig  *appsv1alpha1.ReloadSidecarConfig    `json:"reloadSidecarConfig,omitempty"`
+	EffectPolicy         *appsv1alpha1.EffectPolicy           `json:"effectPolicy,omitempty"`
+	RevisionHistoryLimit *int32                               `json:"revisionHistoryLimit,omitempty"`
 }
 
 type UpdateInfo struct {
@@ -712,14 +712,6 @@ func (r *ReconcileConfigMapSet) executePostHook(ctx context.Context, pod *corev1
 			continue
 		}
 
-		if hook.Exec != nil {
-			stdout, stderr, err := r.execInContainer(ctx, pod, containerName, hook.Exec.Command)
-			if err != nil {
-				return fmt.Errorf("exec hook failed for container %s: %v, stderr: %s", containerName, err, stderr)
-			}
-			klog.Infof("Exec hook for pod %s/%s container %s output: %s", pod.Namespace, pod.Name, containerName, stdout)
-		}
-
 		if hook.HTTPGet != nil {
 			port, err := r.resolvePort(pod, containerName, hook.HTTPGet.Port)
 			if err != nil {
@@ -775,11 +767,11 @@ func (r *ReconcileConfigMapSet) executePostHook(ctx context.Context, pod *corev1
 func (r *ReconcileConfigMapSet) getReloadSidecarName(ctx context.Context, cms *appsv1alpha1.ConfigMapSet) string {
 	expectedSidecarName := fmt.Sprintf("%s-%s", strings.ToLower(cms.Name), "reload-sidecar")
 	if cms.Spec.ReloadSidecarConfig != nil {
-		if cms.Spec.ReloadSidecarConfig.Type == appsv1alpha1.K8sConfigReloadSidecarType && cms.Spec.ReloadSidecarConfig.Config != nil && cms.Spec.ReloadSidecarConfig.Config.Name != "" {
+		if cms.Spec.ReloadSidecarConfig.Type == appsv1alpha1.ReloadSidecarTypeK8s && cms.Spec.ReloadSidecarConfig.Config != nil && cms.Spec.ReloadSidecarConfig.Config.Name != "" {
 			expectedSidecarName = cms.Spec.ReloadSidecarConfig.Config.Name
-		} else if cms.Spec.ReloadSidecarConfig.Type == appsv1alpha1.SidecarSetReloadSidecarType && cms.Spec.ReloadSidecarConfig.Config != nil && cms.Spec.ReloadSidecarConfig.Config.SidecarSetRef != nil {
+		} else if cms.Spec.ReloadSidecarConfig.Type == appsv1alpha1.ReloadSidecarTypeSidecarSet && cms.Spec.ReloadSidecarConfig.Config != nil && cms.Spec.ReloadSidecarConfig.Config.SidecarSetRef != nil {
 			expectedSidecarName = cms.Spec.ReloadSidecarConfig.Config.SidecarSetRef.ContainerName
-		} else if cms.Spec.ReloadSidecarConfig.Type == appsv1alpha1.CustomReloadSidecarType {
+		} else if cms.Spec.ReloadSidecarConfig.Type == appsv1alpha1.ReloadSidecarTypeCustom {
 			if cms.Spec.ReloadSidecarConfig.Config != nil && cms.Spec.ReloadSidecarConfig.Config.ConfigMapRef != nil {
 				cmRef := cms.Spec.ReloadSidecarConfig.Config.ConfigMapRef
 				customerCM := &corev1.ConfigMap{}
@@ -854,7 +846,7 @@ func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *a
 			// 2. Execute EffectPolicy logic
 			if cms.Spec.EffectPolicy != nil {
 				switch cms.Spec.EffectPolicy.Type {
-				case appsv1alpha1.ReStartEffectPolicyType:
+				case appsv1alpha1.EffectPolicyTypeReStart:
 					if latestPod.Labels == nil {
 						latestPod.Labels = make(map[string]string)
 					}
@@ -953,7 +945,7 @@ func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *a
 						requeue = true
 						return nil
 					}
-				case appsv1alpha1.HotUpdateEffectPolicyType:
+				case appsv1alpha1.EffectPolicyTypeHotUpdate:
 					// wait reload-sidecar is ready
 					isReloadSidecarReady := false
 					expectedSidecarName := r.getReloadSidecarName(ctx, cms)
@@ -976,7 +968,7 @@ func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *a
 						requeue = true
 						return nil
 					}
-				case appsv1alpha1.PostHookEffectPolicyType:
+				case appsv1alpha1.EffectPolicyTypePostHook:
 					if latestPod.Labels == nil {
 						latestPod.Labels = make(map[string]string)
 					}
@@ -1242,7 +1234,7 @@ func (r *ReconcileConfigMapSet) cleanHistoryRevision(ctx context.Context, cms *a
 	return nil
 }
 
-func GetContainerName(pod *corev1.Pod, containerSpec appsv1alpha1.ContainerInjectSpec) string {
+func GetContainerName(pod *corev1.Pod, containerSpec appsv1alpha1.ConfigMapSetContainer) string {
 	if containerSpec.Name != "" {
 		return containerSpec.Name
 	}

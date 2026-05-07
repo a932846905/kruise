@@ -176,9 +176,9 @@ func setDefaultContainer(sidecarContainer *v1alpha1.SidecarContainer) {
 	}
 }
 
-// SetDefaults_ConfigMapSet set default values for ConfigMapSet.
+// SetDefaultsConfigMapSet SetDefaults_ConfigMapSet set default values for ConfigMapSet.
 func SetDefaultsConfigMapSet(obj *v1alpha1.ConfigMapSet) {
-	partitionValue := int32(0) // 默认partition为0
+	partitionValue := int32(0)
 	maxUnavailableValue := intstr.FromInt32(1)
 	if obj.Spec.UpdateStrategy.Partition == nil {
 		v := intstr.FromInt32(partitionValue)

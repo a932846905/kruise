@@ -217,7 +217,7 @@ func (h *PodCreateHandler) injectSidecar4Pod(ctx context.Context, pod *corev1.Po
 	}
 
 	if cms.Spec.ReloadSidecarConfig != nil {
-		if cms.Spec.ReloadSidecarConfig.Type == appsv1alpha1.K8sConfigReloadSidecarType {
+		if cms.Spec.ReloadSidecarConfig.Type == appsv1alpha1.ReloadSidecarTypeK8s {
 			if cms.Spec.ReloadSidecarConfig.Config != nil {
 				if cms.Spec.ReloadSidecarConfig.Config.Name != "" {
 					reloadSidecar.Name = cms.Spec.ReloadSidecarConfig.Config.Name
@@ -232,7 +232,7 @@ func (h *PodCreateHandler) injectSidecar4Pod(ctx context.Context, pod *corev1.Po
 					reloadSidecar.RestartPolicy = &cms.Spec.ReloadSidecarConfig.Config.RestartPolicy
 				}
 			}
-		} else if cms.Spec.ReloadSidecarConfig.Type == appsv1alpha1.CustomReloadSidecarType {
+		} else if cms.Spec.ReloadSidecarConfig.Type == appsv1alpha1.ReloadSidecarTypeCustom {
 			if cms.Spec.ReloadSidecarConfig.Config != nil && cms.Spec.ReloadSidecarConfig.Config.ConfigMapRef != nil {
 				cmRef := cms.Spec.ReloadSidecarConfig.Config.ConfigMapRef
 				customerCM := &corev1.ConfigMap{}
@@ -253,7 +253,7 @@ func (h *PodCreateHandler) injectSidecar4Pod(ctx context.Context, pod *corev1.Po
 					return unmarshalErr
 				}
 			}
-		} else if cms.Spec.ReloadSidecarConfig.Type == appsv1alpha1.SidecarSetReloadSidecarType {
+		} else if cms.Spec.ReloadSidecarConfig.Type == appsv1alpha1.ReloadSidecarTypeSidecarSet {
 			klog.Infof("pod %s/%s will be injected by SidecarSet, skip full sidecar injection in ConfigMapSet webhook, just merge VolumeMounts and Env", pod.Namespace, pod.Name)
 
 			// find reload-sidecar in Pod（Because already injected by sidecarSet）
@@ -404,7 +404,7 @@ func (h *PodCreateHandler) injectEmptyDir4Pod(pod *corev1.Pod, cms *appsv1alpha1
 	return nil
 }
 
-func (h *PodCreateHandler) applyVM4Container(pod *corev1.Pod, c *corev1.Container, v appsv1alpha1.ContainerInjectSpec, volumeName string, cms *appsv1alpha1.ConfigMapSet) {
+func (h *PodCreateHandler) applyVM4Container(pod *corev1.Pod, c *corev1.Container, v appsv1alpha1.ConfigMapSetContainer, volumeName string, cms *appsv1alpha1.ConfigMapSet) {
 	// 为业务容器注入用于重启的环境变量，每个容器使用独立的 Annotation Key
 	restartAnnotationKey := configmapset.GetConfigMapSetContainerRestartKey(cms.Name, c.Name)
 	targetRevisionKey := configmapset.GetConfigMapSetUpdateRevisionKey(cms.Name)
@@ -574,15 +574,15 @@ func (h *PodCreateHandler) getReloadSidecarName(ctx context.Context, cms *appsv1
 
 	config := cms.Spec.ReloadSidecarConfig.Config
 	switch cms.Spec.ReloadSidecarConfig.Type {
-	case appsv1alpha1.K8sConfigReloadSidecarType:
+	case appsv1alpha1.ReloadSidecarTypeK8s:
 		if config.Name != "" {
 			return config.Name, nil
 		}
-	case appsv1alpha1.SidecarSetReloadSidecarType:
+	case appsv1alpha1.ReloadSidecarTypeSidecarSet:
 		if config.SidecarSetRef != nil {
 			return config.SidecarSetRef.ContainerName, nil
 		}
-	case appsv1alpha1.CustomReloadSidecarType:
+	case appsv1alpha1.ReloadSidecarTypeCustom:
 		if config.ConfigMapRef != nil {
 			cmNamespace := config.ConfigMapRef.Namespace
 			if cmNamespace == "" {
