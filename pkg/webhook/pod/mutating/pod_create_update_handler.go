@@ -23,11 +23,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"math"
 	"net/http"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
 
 	kubecontroller "k8s.io/kubernetes/pkg/controller"
@@ -624,59 +621,10 @@ func (h *PodCreateHandler) handlePodRevisionAnnotations(ctx context.Context, pod
 		pod.Annotations = make(map[string]string)
 	}
 
-	// Get related pods to calculate partition correctly
-	pods, err := configmapset.GetMatchedPods(ctx, h.Client, cms)
-	if err != nil {
-		return err
-	}
-
-	// Determine if the pod should use the new version or old version based on partition
-	shouldUseNewVersion := true
-
-	if cms.Spec.UpdateStrategy.Partition != nil {
-		groupPods := configmapset.GetPodGroupByMatchLabelKeys(pods, pod, cms.Spec.UpdateStrategy.MatchLabelKeys)
-
-		// Calculate how many pods should be updated based on partition
-		expectedUpdatedCount := len(groupPods) // Default: all pods in group
-		partitionStr := cms.Spec.UpdateStrategy.Partition.String()
-		if strings.HasSuffix(partitionStr, "%") {
-			percentStr := strings.TrimSuffix(partitionStr, "%")
-			if percent, err := strconv.Atoi(percentStr); err == nil && percent >= 0 && percent <= 100 {
-				// newReplicas = replicas - partition
-				expectedUpdatedCount = len(groupPods) - int(math.Ceil(float64(percent)/100.0*float64(len(groupPods))))
-			}
-		} else if count, err := strconv.Atoi(partitionStr); err == nil && count >= 0 {
-			expectedUpdatedCount = len(groupPods) - count
-			if expectedUpdatedCount < 0 {
-				expectedUpdatedCount = 0
-			}
-		}
-
-		// Count how many pods in this group are already at the new version
-		currentUpdatedCount := 0
-		for _, p := range groupPods {
-			if p.Annotations[targetRevisionKey] == updateRevision {
-				currentUpdatedCount++
-			}
-		}
-
-		// If we've already reached the target number of updated pods, this new pod should get the old version
-		if currentUpdatedCount >= expectedUpdatedCount {
-			shouldUseNewVersion = false
-		}
-	}
-
 	now := time.Now().Format("2006-01-02 15:04:05")
-	if shouldUseNewVersion {
-		pod.Annotations[targetRevisionKey] = updateRevision
-		pod.Annotations[currentRevisionKey] = updateRevision
-		pod.Annotations[targetCustomVersionKey] = cms.Spec.CustomVersion
-		pod.Annotations[currentCustomVersionKey] = cms.Spec.CustomVersion
 
-		pod.Annotations[currentRevisionTimestampKey] = now
-		pod.Annotations[updateRevisionTimestampKey] = now
-
-	} else if cms.Status.CurrentRevision != "" {
+	// 方案一：永远注入稳定版本（CurrentRevision）。如果为空（首次发布），才注入目标版本。
+	if cms.Status.CurrentRevision != "" {
 		pod.Annotations[targetRevisionKey] = cms.Status.CurrentRevision
 		pod.Annotations[currentRevisionKey] = cms.Status.CurrentRevision
 		pod.Annotations[targetCustomVersionKey] = cms.Status.CurrentCustomVersion
@@ -684,13 +632,13 @@ func (h *PodCreateHandler) handlePodRevisionAnnotations(ctx context.Context, pod
 
 		pod.Annotations[currentRevisionTimestampKey] = now
 		pod.Annotations[updateRevisionTimestampKey] = now
-
 	} else {
-		// If there is no current revision (first rollout), force new version regardless of partition
+		// If there is no current revision (first rollout), force new version
 		pod.Annotations[targetRevisionKey] = updateRevision
 		pod.Annotations[currentRevisionKey] = updateRevision
 		pod.Annotations[targetCustomVersionKey] = cms.Spec.CustomVersion
 		pod.Annotations[currentCustomVersionKey] = cms.Spec.CustomVersion
+
 		pod.Annotations[currentRevisionTimestampKey] = now
 		pod.Annotations[updateRevisionTimestampKey] = now
 	}
