@@ -496,6 +496,9 @@ func (h *PodCreateHandler) configMapSetMutatingPod(ctx context.Context, req admi
 		return cmsList[i].Name < cmsList[j].Name
 	})
 	for _, cms := range cmsList {
+		if cms.DeletionTimestamp != nil {
+			continue
+		}
 		// 处理创建时的版本注解
 		err = h.handlePodRevisionAnnotations(ctx, pod, cms)
 		if err != nil {
@@ -631,29 +634,7 @@ func (h *PodCreateHandler) handlePodRevisionAnnotations(ctx context.Context, pod
 	shouldUseNewVersion := true
 
 	if cms.Spec.UpdateStrategy.Partition != nil {
-		// Only consider pods matching the same MatchLabelKeys if specified
-		var groupPods []*corev1.Pod
-		if len(cms.Spec.UpdateStrategy.MatchLabelKeys) == 0 {
-			groupPods = pods
-		} else {
-			isMatch := true
-			for _, key := range cms.Spec.UpdateStrategy.MatchLabelKeys {
-				if pod.Labels[key] != "" {
-					// We only need to check if existing pods match this pod's label values
-					for _, p := range pods {
-						if p.Labels[key] == pod.Labels[key] {
-							groupPods = append(groupPods, p)
-						}
-					}
-				} else {
-					isMatch = false
-					break
-				}
-			}
-			if !isMatch {
-				groupPods = pods // fallback to all pods if no labels to match
-			}
-		}
+		groupPods := configmapset.GetPodGroupByMatchLabelKeys(pods, pod, cms.Spec.UpdateStrategy.MatchLabelKeys)
 
 		// Calculate how many pods should be updated based on partition
 		expectedUpdatedCount := len(groupPods) // Default: all pods in group

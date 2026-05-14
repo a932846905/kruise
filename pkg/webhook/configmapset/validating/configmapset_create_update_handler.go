@@ -103,7 +103,7 @@ func (h *ConfigMapSetCreateUpdateHandler) validateConfigMapSetSpec(ctx context.C
 	}
 	// 检查是否已经有相同的revision / customVersion存在
 	// 重新获取最新的 ConfigMap，避免并发冲突
-	cmName := fmt.Sprintf("%s-%s", strings.ToLower(name), "hub")
+	cmName := configmapset.GetConfigMapSetHubName(name)
 	cmNamespace := namespace
 	cm := &corev1.ConfigMap{}
 	if err = h.Client.Get(context.TODO(), types.NamespacedName{Name: cmName, Namespace: cmNamespace}, cm); err != nil {
@@ -118,7 +118,6 @@ func (h *ConfigMapSetCreateUpdateHandler) validateConfigMapSetSpec(ctx context.C
 		if revData, exists := cm.Data["revisions"]; exists {
 			if err := json.Unmarshal([]byte(revData), &revisions); err != nil {
 				klog.Errorf("Failed to unmarshal revisions from ConfigMap %s: %v, resetting revisions", cmName, err)
-				//revisions = []RevisionEntry{} // 解析失败时重置 ?
 				return field.InternalError(fldPath.Child("data"), fmt.Errorf("failed to unmarshal revisions from ConfigMap: %v", err))
 			}
 		}
@@ -127,6 +126,45 @@ func (h *ConfigMapSetCreateUpdateHandler) validateConfigMapSetSpec(ctx context.C
 			// hash must same if customVersion same
 			if rev.CustomVersion == spec.CustomVersion && rev.Hash != hash {
 				return field.Invalid(fldPath.Child("customVersion"), spec.CustomVersion, "configmapset already exists with hash "+rev.Hash+" for customVersion "+spec.CustomVersion)
+			}
+		}
+
+		// RevisionHistoryLimit 校验：如果新 hash 不在已有 revisions 中，检查是否超限
+		isExistingRevision := false
+		for _, rev := range revisions {
+			if rev.Hash == hash {
+				isExistingRevision = true
+				break
+			}
+		}
+		if !isExistingRevision && spec.RevisionHistoryLimit != nil && int32(len(revisions)) >= *spec.RevisionHistoryLimit {
+			// 需要淘汰最旧的版本，检查是否有 Pod 在使用
+			tempCMS := &appsv1alpha1.ConfigMapSet{Spec: *spec}
+			tempCMS.Name = name
+			tempCMS.Namespace = namespace
+			pods, podErr := configmapset.GetMatchedPods(ctx, h.Client, tempCMS)
+			if podErr != nil {
+				// 构造临时对象用于查询匹配 Pod
+				return field.InternalError(fldPath.Child("revisionHistoryLimit"), fmt.Errorf("failed to get matched pods: %v", podErr))
+			}
+			revisionsInUse := make(map[string]bool)
+			currentRevisionKey := configmapset.GetConfigMapSetCurrentRevisionKey(name)
+			for _, pod := range pods {
+				if pod.Annotations != nil && pod.Annotations[currentRevisionKey] != "" {
+					revisionsInUse[pod.Annotations[currentRevisionKey]] = true
+				}
+			}
+			// 从最旧的开始检查能否淘汰
+			keep := int(*spec.RevisionHistoryLimit)
+			excessCount := len(revisions) - keep + 1 // +1 because we're adding a new one
+			removable := 0
+			for _, rev := range revisions {
+				if !revisionsInUse[rev.Hash] {
+					removable++
+				}
+			}
+			if removable < excessCount {
+				return field.Forbidden(fldPath.Child("revisionHistoryLimit"), fmt.Sprintf("cannot add new revision: revisionHistoryLimit is %d, current revisions count is %d, and oldest revisions are still in use by pods", *spec.RevisionHistoryLimit, len(revisions)))
 			}
 		}
 	}

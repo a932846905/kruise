@@ -20,6 +20,7 @@ package configmapset
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -86,7 +87,7 @@ func GetConfigMapSetContainerRestartKey(cmsName, containerName string) string {
 }
 
 func GetConfigMapSetHubName(cmsName string) string {
-	return fmt.Sprintf("%s-hub", strings.ToLower(cmsName))
+	return fmt.Sprintf("%s-hub", cmsName)
 }
 
 func GetConfigMapSetDefaultSidecarName(cmsName string) string {
@@ -207,6 +208,9 @@ func GetMatchConfigMapSets(reader client.Reader, pod *corev1.Pod) ([]*appsv1alph
 	// 可能有多个
 	for i := range configMapSets.Items {
 		cms := configMapSets.Items[i] // 取地址前，先取实际元素
+		if cms.DeletionTimestamp != nil {
+			continue
+		}
 		ls, err := metav1.LabelSelectorAsSelector(cms.Spec.Selector)
 		if err != nil {
 			return nil, fmt.Errorf("invalid label selector for ConfigMapSet %s: %v", cms.Name, err)
@@ -217,6 +221,60 @@ func GetMatchConfigMapSets(reader client.Reader, pod *corev1.Pod) ([]*appsv1alph
 	}
 
 	return res, nil
+}
+
+// GroupPodsByMatchLabelKeys groups pods by matchLabelKeys values.
+// Missing key and empty value are treated equivalently.
+// Pods form a group if and only if they have the same value for ALL keys.
+// Returns groups in deterministic order.
+func GroupPodsByMatchLabelKeys(pods []*corev1.Pod, matchLabelKeys []string) [][]*corev1.Pod {
+	if len(matchLabelKeys) == 0 {
+		return [][]*corev1.Pod{pods}
+	}
+	groupMap := make(map[string][]*corev1.Pod)
+	for _, pod := range pods {
+		groupKey := podGroupKey(pod, matchLabelKeys)
+		groupMap[groupKey] = append(groupMap[groupKey], pod)
+	}
+	keys := make([]string, 0, len(groupMap))
+	for k := range groupMap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	groups := make([][]*corev1.Pod, 0, len(keys))
+	for _, k := range keys {
+		groups = append(groups, groupMap[k])
+	}
+	return groups
+}
+
+// GetPodGroupByMatchLabelKeys returns the subset of pods that belong to the same group as targetPod.
+func GetPodGroupByMatchLabelKeys(pods []*corev1.Pod, targetPod *corev1.Pod, matchLabelKeys []string) []*corev1.Pod {
+	if len(matchLabelKeys) == 0 {
+		return pods
+	}
+	var group []*corev1.Pod
+	for _, p := range pods {
+		allMatch := true
+		for _, key := range matchLabelKeys {
+			if p.Labels[key] != targetPod.Labels[key] {
+				allMatch = false
+				break
+			}
+		}
+		if allMatch {
+			group = append(group, p)
+		}
+	}
+	return group
+}
+
+func podGroupKey(pod *corev1.Pod, matchLabelKeys []string) string {
+	keyVals := make([]string, len(matchLabelKeys))
+	for i, key := range matchLabelKeys {
+		keyVals[i] = fmt.Sprintf("%d=%s", len(pod.Labels[key]), pod.Labels[key])
+	}
+	return strings.Join(keyVals, "\x00")
 }
 
 func getMatchedPods(reader client.Reader, cms *appsv1alpha1.ConfigMapSet) (*corev1.PodList, error) {

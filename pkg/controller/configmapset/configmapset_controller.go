@@ -54,6 +54,7 @@ import (
 	"k8s.io/utils/pointer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	runController "sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -307,14 +308,17 @@ func (r *ReconcileConfigMapSet) syncRevisions(ctx context.Context, cms *appsv1al
 		cm := &corev1.ConfigMap{}
 		if err = r.Get(ctx, types.NamespacedName{Name: cmName, Namespace: cmNamespace}, cm); err != nil {
 			if errors.IsNotFound(err) {
-				err = r.Create(ctx, &corev1.ConfigMap{
+				newCM := &corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      cmName,
 						Namespace: cmNamespace,
 					},
 					Data: make(map[string]string),
-				})
-				if err != nil {
+				}
+				if err = controllerutil.SetControllerReference(cms, newCM, r.scheme); err != nil {
+					return fmt.Errorf("failed to set owner reference on ConfigMap %s/%s: %v", cmNamespace, cmName, err)
+				}
+				if err = r.Create(ctx, newCM); err != nil {
 					return fmt.Errorf("failed to create ConfigMap %s/%s: %v", cmNamespace, cmName, err)
 				}
 				return fmt.Errorf("create ConfigMap %s/%s: %v", cmNamespace, cmName, err)
@@ -359,6 +363,21 @@ func (r *ReconcileConfigMapSet) syncRevisions(ctx context.Context, cms *appsv1al
 	})
 }
 
+func (r *ReconcileConfigMapSet) getHubRevisions(ctx context.Context, cms *appsv1alpha1.ConfigMapSet) ([]RevisionEntry, error) {
+	cmName := GetConfigMapSetHubName(cms.Name)
+	cm := &corev1.ConfigMap{}
+	if err := r.Get(ctx, types.NamespacedName{Name: cmName, Namespace: cms.Namespace}, cm); err != nil {
+		return nil, err
+	}
+	var revisions []RevisionEntry
+	if revData, exists := cm.Data["revisions"]; exists {
+		if err := json.Unmarshal([]byte(revData), &revisions); err != nil {
+			return nil, err
+		}
+	}
+	return revisions, nil
+}
+
 func (r *ReconcileConfigMapSet) SyncPods(ctx context.Context, cms *appsv1alpha1.ConfigMapSet, pods []*corev1.Pod) (bool, error) {
 	klog.Infof("Syncing pods for ConfigMapSet %s/%s", cms.Namespace, cms.Name)
 	revisionKeys := &RevisionKeys{
@@ -369,59 +388,39 @@ func (r *ReconcileConfigMapSet) SyncPods(ctx context.Context, cms *appsv1alpha1.
 		UpdateCustomVersionKey:      GetConfigMapSetUpdateCustomVersionKey(cms.Name),
 		UpdateRevisionTimeStampKey:  GetConfigMapSetUpdateRevisionTimeStampKey(cms.Name),
 	}
+	// 加载 hub ConfigMap 中的版本列表，用于 Pod 选择优先级排序
+	hubRevisions, err := r.getHubRevisions(ctx, cms)
+	if err != nil {
+		klog.Errorf("Failed to load hub revisions for ConfigMapSet %s/%s: %v, pod selection priority rules 2&3 will be degraded", cms.Namespace, cms.Name, err)
+		return false, err
+	}
+
 	// 根据更新策略选择要更新的Pod
 	updateStrategy := cms.Spec.UpdateStrategy
 
 	requeue := false
 
-	// 定义了Partition,就只更新replicas-partition个Pod实例，没定义就是全部需要更新
-	if updateStrategy.Partition != nil {
-		// Group pods by matchLabelKeys
-		var podGroups [][]*corev1.Pod
-		if len(updateStrategy.MatchLabelKeys) == 0 {
-			podGroups = append(podGroups, pods)
-		} else {
-			groupMap := make(map[string][]*corev1.Pod)
-			for _, pod := range pods {
-				keyVals := make([]string, len(updateStrategy.MatchLabelKeys))
-				for i, key := range updateStrategy.MatchLabelKeys {
-					keyVals[i] = pod.Labels[key]
-				}
-				groupKey := strings.Join(keyVals, "|")
-				groupMap[groupKey] = append(groupMap[groupKey], pod)
-			}
-			// Map iteration order is non-deterministic, so sort keys for consistent grouping
-			var keys []string
-			for k := range groupMap {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			for _, k := range keys {
-				podGroups = append(podGroups, groupMap[k])
-			}
-		}
+	podGroups := GroupPodsByMatchLabelKeys(pods, updateStrategy.MatchLabelKeys)
 
-		var allErrs []error
-		for _, group := range podGroups {
-			distributions, err := getDistributionByPartition(cms, group)
-			if err != nil {
-				klog.Errorf("failed to transform partition to distribution: %v", err)
-				allErrs = append(allErrs, fmt.Errorf("failed to transform partition to distribution: %v", err))
-				continue
-			}
-			groupRequeue, err := r.UpdateByDistribution(ctx, cms, distributions, group, revisionKeys)
-			if groupRequeue {
-				requeue = true
-			}
-			if err != nil {
-				allErrs = append(allErrs, err)
-			}
+	var allErrs []error
+	for _, group := range podGroups {
+		distributions, err := getDistributionByPartition(cms, group)
+		if err != nil {
+			klog.Errorf("failed to transform partition to distribution: %v", err)
+			allErrs = append(allErrs, fmt.Errorf("failed to transform partition to distribution: %v", err))
+			continue
 		}
+		groupRequeue, err := r.UpdateByDistribution(ctx, cms, distributions, group, revisionKeys, hubRevisions)
+		if groupRequeue {
+			requeue = true
+		}
+		if err != nil {
+			allErrs = append(allErrs, err)
+		}
+	}
 
-		if len(allErrs) > 0 {
-			return requeue, fmt.Errorf("errors occurred during syncPods: %v", allErrs)
-		}
-		return requeue, nil
+	if len(allErrs) > 0 {
+		return requeue, fmt.Errorf("errors occurred during syncPods: %v", allErrs)
 	}
 	return requeue, nil
 }
@@ -486,13 +485,13 @@ func getDistributionByPartition(cms *appsv1alpha1.ConfigMapSet, pods []*corev1.P
 	return distributions, nil
 }
 
-func getUpdateInfoByDistribution(cms *appsv1alpha1.ConfigMapSet, distributions []Distribution, pods []*corev1.Pod, revisionKeys *RevisionKeys) (*UpdateInfo, error) {
+func getUpdateInfoByDistribution(cms *appsv1alpha1.ConfigMapSet, distributions []Distribution, pods []*corev1.Pod, revisionKeys *RevisionKeys, hubRevisions []RevisionEntry) (*UpdateInfo, error) {
 	// 收集待更新 pod（多余版本 -> 目标版本）
 	var podsToUpdate []*corev1.Pod
 	targetRevisions := make([]string, 0)
 	targetCustomVersions := make([]string, 0)
 
-	podsToUpdate, targetRevisions, targetCustomVersions = getUpdatePodsByDistributions(cms, distributions, pods, revisionKeys)
+	podsToUpdate, targetRevisions, targetCustomVersions = getUpdatePodsByDistributions(cms, distributions, pods, revisionKeys, hubRevisions)
 	return &UpdateInfo{
 		PodsToUpdate:         podsToUpdate,
 		TargetRevisions:      targetRevisions,
@@ -500,7 +499,7 @@ func getUpdateInfoByDistribution(cms *appsv1alpha1.ConfigMapSet, distributions [
 	}, nil
 }
 
-func getUpdatePodsByDistributions(cms *appsv1alpha1.ConfigMapSet, distributions []Distribution, pods []*v1.Pod, revisionKeys *RevisionKeys) ([]*v1.Pod, []string, []string) {
+func getUpdatePodsByDistributions(cms *appsv1alpha1.ConfigMapSet, distributions []Distribution, pods []*v1.Pod, revisionKeys *RevisionKeys, hubRevisions []RevisionEntry) ([]*v1.Pod, []string, []string) {
 	updateDistribution := distributions[0]
 	currentDistribution := distributions[1]
 
@@ -556,6 +555,12 @@ func getUpdatePodsByDistributions(cms *appsv1alpha1.ConfigMapSet, distributions 
 		return podsToUpdate, targetRevisions, targetCustomVersions
 	}
 
+	// 构建 hub revision 索引：hash -> 在 hub 中的位置（越小越旧）
+	hubRevisionIndex := make(map[string]int, len(hubRevisions))
+	for idx, rev := range hubRevisions {
+		hubRevisionIndex[rev.Hash] = idx
+	}
+
 	// Sort valid pods based on the priority rules
 	sort.Slice(validPods, func(i, j int) bool {
 		podI := validPods[i]
@@ -580,22 +585,29 @@ func getUpdatePodsByDistributions(cms *appsv1alpha1.ConfigMapSet, distributions 
 			return false
 		}
 
-		// At this point, both are either currentRevision or both are non-currentRevision
 		// For non-currentRevision pods, apply rules 2 and 3
 		if !isICurrent && !isJCurrent {
-			// In a real implementation, we would check if they exist in RMC and compare their generation
-			// For simplicity without having the RMC context here, we can fall back to creation timestamp
-			// or other deterministic properties if needed, but we'll try to follow the spirit of the rules
+			idxI, inRMCI := hubRevisionIndex[revI]
+			idxJ, inRMCJ := hubRevisionIndex[revJ]
 
-			// If we had RMC info:
-			// 3. Not in RMC > in RMC (we don't have RMC info here directly)
-			// 2. Smaller generation > larger generation (we can use ResourceVersion or CreationTimestamp as a proxy if generation is not available)
+			// 3. 不存在于 RMC 的版本 > 存在于 RMC 的版本
+			if !inRMCI && inRMCJ {
+				return true
+			}
+			if inRMCI && !inRMCJ {
+				return false
+			}
+
+			// 2. 序号小的版本（更旧）> 序号大的版本（更新）
+			if inRMCI && inRMCJ && idxI != idxJ {
+				return idxI < idxJ
+			}
 		}
+
 		if podI.CreationTimestamp.Equal(&podJ.CreationTimestamp) {
 			return podI.Name < podJ.Name
 		}
 
-		// Deterministic fallback: older pods get updated first
 		return podI.CreationTimestamp.Before(&podJ.CreationTimestamp)
 	})
 
@@ -794,8 +806,8 @@ func (r *ReconcileConfigMapSet) getReloadSidecarName(ctx context.Context, cms *a
 	return expectedSidecarName
 }
 
-func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *appsv1alpha1.ConfigMapSet, distributions []Distribution, pods []*corev1.Pod, revisionKeys *RevisionKeys) (bool, error) {
-	updateInfo, err := getUpdateInfoByDistribution(cms, distributions, pods, revisionKeys)
+func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *appsv1alpha1.ConfigMapSet, distributions []Distribution, pods []*corev1.Pod, revisionKeys *RevisionKeys, hubRevisions []RevisionEntry) (bool, error) {
+	updateInfo, err := getUpdateInfoByDistribution(cms, distributions, pods, revisionKeys, hubRevisions)
 	if err != nil {
 		klog.Errorf("failed to fetch update info: %v", err)
 		return false, err
@@ -1164,8 +1176,7 @@ func (r *ReconcileConfigMapSet) updateStatus(ctx context.Context, request reconc
 }
 
 func (r *ReconcileConfigMapSet) cleanHistoryRevision(ctx context.Context, cms *appsv1alpha1.ConfigMapSet) error {
-	// ConfigMap 命名：cms.Name + "-hub"
-	cmName := fmt.Sprintf("%s-hub", cms.Name)
+	cmName := GetConfigMapSetHubName(cms.Name)
 	cmNamespace := cms.Namespace
 
 	var revisions []RevisionEntry
@@ -1197,16 +1208,27 @@ func (r *ReconcileConfigMapSet) cleanHistoryRevision(ctx context.Context, cms *a
 			}
 		}
 
-		// 维护 RevisionHistoryLimit
-		// 保留最新的 RevisionHistoryLimit 个
-		if cms.Spec.RevisionHistoryLimit != nil && int32(len(revisions)) > *cms.Spec.RevisionHistoryLimit {
-			klog.Infof("Trimming old revisions to match RevisionHistoryLimit (%d)", *cms.Spec.RevisionHistoryLimit)
-			keep := int(*cms.Spec.RevisionHistoryLimit)
-			start := len(revisions) - keep
-			if start < 0 {
-				start = 0
+		// 如果配置版本数量达到了 Limit，移除没有 Pod 在使用的最旧一个版本
+		if cms.Spec.RevisionHistoryLimit != nil && int32(len(revisions)) >= *cms.Spec.RevisionHistoryLimit {
+			pods, podErr := GetMatchedPods(ctx, r.Client, cms)
+			if podErr != nil {
+				return podErr
 			}
-			revisions = revisions[start:] // 要保留的版本
+			revisionsInUse := make(map[string]bool)
+			currentRevisionKey := GetConfigMapSetCurrentRevisionKey(cms.Name)
+			for _, pod := range pods {
+				if pod.Annotations != nil && pod.Annotations[currentRevisionKey] != "" {
+					revisionsInUse[pod.Annotations[currentRevisionKey]] = true
+				}
+			}
+			// 从最旧的开始找到第一个没有 Pod 使用的版本并移除
+			for i, rev := range revisions {
+				if !revisionsInUse[rev.Hash] {
+					klog.Infof("Removing oldest unused revision %s (customVersion=%s) from hub to maintain limit %d", rev.Hash, rev.CustomVersion, *cms.Spec.RevisionHistoryLimit)
+					revisions = append(revisions[:i], revisions[i+1:]...)
+					break
+				}
+			}
 		}
 
 		klog.Infof("Updated revisions for ConfigMapSet %s/%s: %v", cms.Namespace, cms.Name, revisions)
@@ -1286,12 +1308,22 @@ func (r *ReconcileConfigMapSet) rebootSidecarsByCrr(pod *corev1.Pod, containerNa
 	}
 
 	// Create a new CRR
+	isController := true
 	crr := &appsv1alpha1.ContainerRecreateRequest{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      crrName,
 			Namespace: pod.Namespace,
 			Labels: map[string]string{
 				GetConfigMapSetCrrKey(): "true",
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "v1",
+					Kind:       "Pod",
+					Name:       pod.Name,
+					UID:        pod.UID,
+					Controller: &isController,
+				},
 			},
 		},
 		Spec: appsv1alpha1.ContainerRecreateRequestSpec{
