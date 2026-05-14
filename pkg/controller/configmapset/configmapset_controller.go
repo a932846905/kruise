@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"k8s.io/utils/ptr"
 	"math"
 	"net"
 	"net/http"
@@ -674,7 +675,7 @@ func (r *ReconcileConfigMapSet) execInContainer(ctx context.Context, pod *corev1
 
 func (r *ReconcileConfigMapSet) verifySharedVolumeUpdated(ctx context.Context, pod *corev1.Pod, cms *appsv1alpha1.ConfigMapSet) error {
 	containerName := r.getReloadSidecarName(ctx, cms)
-	configMountPath := fmt.Sprintf("%s/%s", "/etc/config", strings.ToLower(cms.Name))
+	configMountPath := GetConfigMapSetConfigMountPath(cms.Name)
 
 	for key, expectedVal := range cms.Spec.Data {
 		cmd := []string{"cat", fmt.Sprintf("%s/%s", configMountPath, key)}
@@ -848,7 +849,7 @@ func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *a
 				latestPod.Annotations[revisionKeys.UpdateCustomVersionKey] = targetCustomVersion
 
 				klog.Infof("Updating TargetRevision for Pod %s/%s to %s to trigger reload-sidecar update", latestPod.Namespace, latestPod.Name, targetRevision)
-				err := r.Update(ctx, latestPod)
+				err = r.Update(ctx, latestPod)
 				if err == nil {
 					requeue = true
 				}
@@ -880,12 +881,11 @@ func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *a
 
 					if needRestart {
 						klog.Infof("Triggering reload-sidecar container inplace-update for Pod %s/%s to revision %s", latestPod.Namespace, latestPod.Name, targetRevision)
-						err = r.Update(ctx, latestPod)
+						err = r.rebootSidecarByCrr(latestPod, reloadSidecarName, hashStr)
 						if err != nil {
-							requeue = true
 							return err
 						}
-						err = r.rebootSidecarByCrr(latestPod, reloadSidecarName, hashStr)
+						err = r.Update(ctx, latestPod)
 						if err == nil {
 							requeue = true
 						}
@@ -893,11 +893,10 @@ func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *a
 					}
 
 					// wait reload-sidecar reboot success
-					err = r.waitSidecarRebootByCrrSuccess(latestPod, reloadSidecarName, hashStr)
+					err = r.waitSidecarRebootByCrrSuccess(ctx, latestPod, reloadSidecarName, hashStr)
 					if err != nil {
-						klog.Infof("Pod %s/%s reload-sidecar (%s) is not rebooted yet, waiting...", latestPod.Namespace, latestPod.Name, reloadSidecarName)
-						requeue = true
-						return nil
+						klog.Errorf("Pod %s/%s reload-sidecar (%s) is not rebooted yet because of %s, waiting...", latestPod.Namespace, latestPod.Name, reloadSidecarName, err.Error())
+						return err
 					}
 
 					// wait reload-sidecar is ready
@@ -939,11 +938,11 @@ func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *a
 
 					if needRestart {
 						klog.Infof("Triggering business container inplace-update for Pod %s/%s to revision %s", latestPod.Namespace, latestPod.Name, targetRevision)
-						err = r.Update(ctx, latestPod)
+						err = r.rebootSidecarsByCrr(latestPod, rebootContainerNames, hashStr)
 						if err != nil {
 							return err
 						}
-						err = r.rebootSidecarsByCrr(latestPod, rebootContainerNames, hashStr)
+						err = r.Update(ctx, latestPod)
 						if err == nil {
 							requeue = true
 						}
@@ -951,7 +950,7 @@ func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *a
 					}
 
 					// wait business-sidecar reboot success
-					err = r.waitSidecarsRebootByCrrSuccess(latestPod, rebootContainerNames, hashStr)
+					err = r.waitSidecarsRebootByCrrSuccess(ctx, latestPod, rebootContainerNames, hashStr)
 					if err != nil {
 						klog.Infof("Pod %s/%s business-sidecars (%v) is not rebooted yet, waiting...", latestPod.Namespace, latestPod.Name, rebootContainerNames)
 						requeue = true
@@ -1002,19 +1001,19 @@ func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *a
 
 					if needRestart {
 						klog.Infof("Triggering reload-sidecar container inplace-update for Pod %s/%s to revision %s", latestPod.Namespace, latestPod.Name, targetRevision)
-						err = r.Update(ctx, latestPod)
+						err = r.rebootSidecarByCrr(latestPod, reloadSidecarName, hashStr)
 						if err != nil {
 							return err
 						}
-						err = r.rebootSidecarByCrr(latestPod, reloadSidecarName, hashStr)
-						if err != nil {
+						err = r.Update(ctx, latestPod)
+						if err == nil {
 							requeue = true
 						}
 						return err
 					}
 
 					// wait business-sidecar reboot success
-					err = r.waitSidecarRebootByCrrSuccess(latestPod, reloadSidecarName, hashStr)
+					err = r.waitSidecarRebootByCrrSuccess(ctx, latestPod, reloadSidecarName, hashStr)
 					if err != nil {
 						klog.Infof("Pod %s/%s reload-sidecar (%s) is not rebooted yet, waiting...", latestPod.Namespace, latestPod.Name, reloadSidecarName)
 						requeue = true
@@ -1329,11 +1328,13 @@ func (r *ReconcileConfigMapSet) rebootSidecarsByCrr(pod *corev1.Pod, containerNa
 		Spec: appsv1alpha1.ContainerRecreateRequestSpec{
 			PodName: pod.Name,
 			Strategy: &appsv1alpha1.ContainerRecreateRequestStrategy{
-				FailurePolicy:   appsv1alpha1.ContainerRecreateRequestFailurePolicyIgnore,
-				OrderedRecreate: true,
+				FailurePolicy:             appsv1alpha1.ContainerRecreateRequestFailurePolicyFail,
+				OrderedRecreate:           true,
+				UnreadyGracePeriodSeconds: ptr.To[int64](5),
+				MinStartedSeconds:         int32(3),
 			},
-			ActiveDeadlineSeconds:   pointer.Int64(300),
-			TTLSecondsAfterFinished: pointer.Int32(10),
+			ActiveDeadlineSeconds:   pointer.Int64(7200),
+			TTLSecondsAfterFinished: pointer.Int32(3),
 		},
 	}
 
@@ -1356,11 +1357,11 @@ func (r *ReconcileConfigMapSet) rebootSidecarsByCrr(pod *corev1.Pod, containerNa
 	return nil
 }
 
-func (r *ReconcileConfigMapSet) waitSidecarRebootByCrrSuccess(pod *corev1.Pod, containerName string, hashStr string) error {
-	return r.waitSidecarsRebootByCrrSuccess(pod, []string{containerName}, hashStr)
+func (r *ReconcileConfigMapSet) waitSidecarRebootByCrrSuccess(ctx context.Context, pod *corev1.Pod, containerName string, hashStr string) error {
+	return r.waitSidecarsRebootByCrrSuccess(ctx, pod, []string{containerName}, hashStr)
 }
 
-func (r *ReconcileConfigMapSet) waitSidecarsRebootByCrrSuccess(pod *corev1.Pod, containerNames []string, hashStr string) error {
+func (r *ReconcileConfigMapSet) waitSidecarsRebootByCrrSuccess(ctx context.Context, pod *corev1.Pod, containerNames []string, hashStr string) error {
 	if len(containerNames) == 0 {
 		return nil
 	}
@@ -1375,7 +1376,7 @@ func (r *ReconcileConfigMapSet) waitSidecarsRebootByCrrSuccess(pod *corev1.Pod, 
 	crrName := fmt.Sprintf("%s-%s", pod.Name, combinedHashStr)
 
 	crr := &appsv1alpha1.ContainerRecreateRequest{}
-	err := r.Get(context.TODO(), types.NamespacedName{Namespace: pod.Namespace, Name: crrName}, crr)
+	err := r.Get(ctx, types.NamespacedName{Namespace: pod.Namespace, Name: crrName}, crr)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil
@@ -1395,7 +1396,7 @@ func (r *ReconcileConfigMapSet) waitSidecarsRebootByCrrSuccess(pod *corev1.Pod, 
 	}
 
 	// Clean up the CRR since we have successfully rebooted
-	err = r.Delete(context.TODO(), crr)
+	err = r.Delete(ctx, crr)
 	if err != nil && !errors.IsNotFound(err) {
 		klog.Errorf("Failed to delete completed CRR %s for pod %s/%s: %v", crrName, pod.Namespace, pod.Name, err)
 		return err
