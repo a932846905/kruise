@@ -461,7 +461,7 @@ func TestValidateConfigMapSetSpec(t *testing.T) {
 }
 
 func TestRevisionHistoryLimitValidation(t *testing.T) {
-	// 构造一个达到 Limit 的场景
+	// Construct a scenario where the Limit is reached
 	revisions := []configmapset.RevisionEntry{
 		{Hash: "hash1", CustomVersion: "v1"},
 		{Hash: "hash2", CustomVersion: "v2"},
@@ -478,7 +478,7 @@ func TestRevisionHistoryLimitValidation(t *testing.T) {
 		},
 	}
 
-	// 构造一个 Pod 正在使用最老的 revision "hash1"
+	// Construct a Pod that is using the oldest revision "hash1"
 	pod1 := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-pod-1",
@@ -512,7 +512,7 @@ func TestRevisionHistoryLimitValidation(t *testing.T) {
 		Client: fakeClient,
 	}
 
-	// 尝试发布一个新版本 hash3
+	// Try to publish a new version hash3
 	spec := &appsv1alpha1.ConfigMapSetSpec{
 		Selector: &metav1.LabelSelector{
 			MatchLabels: map[string]string{"app": "test"},

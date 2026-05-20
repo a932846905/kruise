@@ -96,13 +96,13 @@ func (h *ConfigMapSetCreateUpdateHandler) validateConfigMapSetSpec(ctx context.C
 		}
 	}
 
-	// 计算当前 Spec.Data 的 Hash
+	// Calculate Hash of current Spec.Data
 	hash, err := configmapset.CalculateHash(spec.Data)
 	if err != nil {
 		return field.InternalError(fldPath.Child("data"), fmt.Errorf("failed to compute hash: %v", err))
 	}
-	// 检查是否已经有相同的revision / customVersion存在
-	// 重新获取最新的 ConfigMap，避免并发冲突
+	// Check if the same revision / customVersion already exists
+	// Re-fetch the latest ConfigMap to avoid concurrent conflicts
 	cmName := configmapset.GetConfigMapSetHubName(name)
 	cmNamespace := namespace
 	cm := &corev1.ConfigMap{}
@@ -129,7 +129,7 @@ func (h *ConfigMapSetCreateUpdateHandler) validateConfigMapSetSpec(ctx context.C
 			}
 		}
 
-		// RevisionHistoryLimit 校验：如果新 hash 不在已有 revisions 中，检查是否超限
+		// RevisionHistoryLimit validation: if new hash is not in existing revisions, check if limit exceeded
 		isExistingRevision := false
 		for _, rev := range revisions {
 			if rev.Hash == hash {
@@ -138,13 +138,13 @@ func (h *ConfigMapSetCreateUpdateHandler) validateConfigMapSetSpec(ctx context.C
 			}
 		}
 		if !isExistingRevision && spec.RevisionHistoryLimit != nil && int32(len(revisions)) >= *spec.RevisionHistoryLimit {
-			// 需要淘汰最旧的版本，检查是否有 Pod 在使用
+			// Need to evict the oldest revision, check if any Pod is using it
 			tempCMS := &appsv1alpha1.ConfigMapSet{Spec: *spec}
 			tempCMS.Name = name
 			tempCMS.Namespace = namespace
 			pods, podErr := configmapset.GetMatchedPods(ctx, h.Client, tempCMS)
 			if podErr != nil {
-				// 构造临时对象用于查询匹配 Pod
+				// Construct temporary object for querying matched Pods
 				return field.InternalError(fldPath.Child("revisionHistoryLimit"), fmt.Errorf("failed to get matched pods: %v", podErr))
 			}
 			revisionsInUse := make(map[string]bool)
@@ -154,7 +154,7 @@ func (h *ConfigMapSetCreateUpdateHandler) validateConfigMapSetSpec(ctx context.C
 					revisionsInUse[pod.Annotations[currentRevisionKey]] = true
 				}
 			}
-			// 从最旧的开始检查能否淘汰
+			// Check from the oldest whether it can be evicted
 			keep := int(*spec.RevisionHistoryLimit)
 			excessCount := len(revisions) - keep + 1 // +1 because we're adding a new one
 			removable := 0
@@ -327,7 +327,7 @@ func validatePartition(partition *intstr.IntOrString) bool {
 		if !percentagePattern.MatchString(partition.StrVal) {
 			return false
 		}
-		// 去掉 % 后验证是否为0-100的整数
+		// Remove % and verify if it is an integer between 0-100
 		valStr := partition.StrVal[:len(partition.StrVal)-1]
 		val, err := strconv.Atoi(valStr)
 		return err == nil && val >= 0 && val <= 100
@@ -336,7 +336,7 @@ func validatePartition(partition *intstr.IntOrString) bool {
 	}
 }
 
-// 验证 maxUnavailable 是否为 1~100 的百分比，或正整数（>0）
+// Verify if maxUnavailable is a percentage between 1~100, or a positive integer (>0)
 func validateMaxUnavailable(maxUnavailable *intstr.IntOrString) bool {
 	if maxUnavailable == nil {
 		return false
@@ -357,7 +357,7 @@ func validateMaxUnavailable(maxUnavailable *intstr.IntOrString) bool {
 			}
 			return true
 		}
-		// 非百分比情况，解析为整数
+		// Non-percentage case, parse as integer
 		num, err := strconv.Atoi(s)
 		if err != nil || num < 0 {
 			return false

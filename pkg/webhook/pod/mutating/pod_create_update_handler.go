@@ -228,10 +228,11 @@ func (h *PodCreateHandler) injectSidecar4Pod(ctx context.Context, pod *corev1.Po
 TARGET_REVISION=$(cat /etc/cms_config/target_revision 2>/dev/null || true)
 if [ -z "$TARGET_REVISION" ]; then exit 0; fi
 
-# 1. 验证目标版本与本地标识是否一致（要求 sidecar 写入 .current_revision）
-# 这里保留对内容 hash 检查的兼容性。因为不同语言和系统环境下算出的 hash 算法差异较大，
-# 标准做法是：reload-sidecar 在将 configmap-hub 的对应版本文件拷贝到共享目录后，
-# 自行在共享目录下生成一个隐藏文件 '.current_revision' 记录已更新的 Hash 版本。
+# 1. Verify target revision matches local identity (requires sidecar to write .current_revision)
+# Retaining compatibility for content hash check here. Because the hash algorithm (json.marshal) 
+# differs across languages and OS, the standard practice is:
+# After reload-sidecar copies/updates the files from configmap-hub to the shared directory,
+# it generates a hidden file '.current_revision' in the shared directory to record the updated Hash.
 if [ -f /etc/config/.current_revision ]; then
     CURRENT_REVISION=$(cat /etc/config/.current_revision)
     if [ "$TARGET_REVISION" != "$CURRENT_REVISION" ]; then
@@ -241,7 +242,7 @@ else
     exit 1
 fi
 
-# 2. 如果配置了 PostHook，检查成功标记
+# 2. If PostHook is configured, check for success marker
 POST_HOOK_CONFIG=$(cat /etc/cms_config/post_hook_config 2>/dev/null || true)
 if [ -n "$POST_HOOK_CONFIG" ] && [ "$POST_HOOK_CONFIG" != "null" ]; then
     if [ ! -f "/etc/config/.post_hook_success_${TARGET_REVISION}" ]; then
@@ -307,7 +308,7 @@ exit 0
 		} else if cms.Spec.ReloadSidecarConfig.Type == appsv1alpha1.ReloadSidecarTypeSidecarSet {
 			klog.Infof("pod %s/%s will be injected by SidecarSet, skip full sidecar injection in ConfigMapSet webhook, just merge VolumeMounts and Env", pod.Namespace, pod.Name)
 
-			// find reload-sidecar in Pod（Because already injected by sidecarSet）
+			// find reload-sidecar in Pod (because already injected by sidecarSet)
 			targetSidecarName := cms.Spec.ReloadSidecarConfig.Config.SidecarSetRef.ContainerName
 			var container *corev1.Container
 			for _, c := range pod.Spec.Containers {
@@ -353,7 +354,7 @@ exit 0
 		}
 	}
 
-	// 查找是否已有相同的 Sidecar 容器
+	// Find if the same Sidecar container already exists
 	containerExistingIdx := -1
 	for i, c := range pod.Spec.Containers {
 		if c.Name == reloadSidecar.Name {
@@ -413,7 +414,7 @@ func (h *PodCreateHandler) injectEmptyDir4Pod(pod *corev1.Pod, cms *appsv1alpha1
 		},
 	}
 	existingIdx := -1
-	// 先判断有没有重复的volume
+	// Check if the volume already exists
 	for index, v := range pod.Spec.Volumes {
 		if v.Name == volume.Name {
 			existingIdx = index
@@ -442,14 +443,14 @@ func (h *PodCreateHandler) injectEmptyDir4Pod(pod *corev1.Pod, cms *appsv1alpha1
 func (h *PodCreateHandler) applyVM4Container(c *corev1.Container, v appsv1alpha1.ConfigMapSetContainer, volumeName string) {
 	for i := range c.VolumeMounts {
 		if c.VolumeMounts[i].Name == volumeName {
-			// 修改vm挂载的路径即可
+			// Update the mount path of the existing volume mount
 			c.VolumeMounts[i].MountPath = v.MountPath
 			return
 		}
 	}
 	c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
 		Name:      volumeName,
-		MountPath: v.MountPath, // 挂载路径
+		MountPath: v.MountPath, // Mount path
 		ReadOnly:  true,
 	})
 }
@@ -472,7 +473,7 @@ func (h *PodCreateHandler) configMapSetMutatingPod(ctx context.Context, req admi
 	}
 
 	cmsList, err := configmapset.GetMatchConfigMapSets(h.Client, pod)
-	if err != nil { // 返回error说明不是notfound
+	if err != nil { // Return error if it's not a NotFound error
 		klog.Errorf("get matched cms for pod %s/%s failed, error : %v", pod.Namespace, pod.Name, err)
 		return false, fmt.Errorf("get related cms for pod %s/%s failed, error : %v", pod.Namespace, pod.Name, err)
 	}
@@ -496,7 +497,7 @@ func (h *PodCreateHandler) configMapSetMutatingPod(ctx context.Context, req admi
 		if cms.DeletionTimestamp != nil {
 			continue
 		}
-		// 处理创建时的版本注解
+		// Handle version annotations on creation
 		err = h.handlePodRevisionAnnotations(ctx, pod, cms)
 		if err != nil {
 			klog.Errorf("handle revision annotations for pod %s/%s failed, error : %v", pod.Namespace, pod.Name, err)
@@ -532,8 +533,8 @@ func (h *PodCreateHandler) checkConfigMapSetConflicts(ctx context.Context, pod *
 		return nil
 	}
 
-	sidecarNames := make(map[string]string)
-	mountPaths := make(map[string]map[string]string)
+	sidecarNames := make(map[string]string)          // Sidecar Container Name -> ConfigMapSet Name
+	mountPaths := make(map[string]map[string]string) // ContainerName -> MountPath -> ConfigMapSet Name
 
 	for _, cms := range cmsList {
 		// 1. Check for reload-sidecar name conflicts
@@ -584,20 +585,23 @@ func (h *PodCreateHandler) getReloadSidecarName(ctx context.Context, cms *appsv1
 		}
 	case appsv1alpha1.ReloadSidecarTypeCustom:
 		if config.ConfigMapRef != nil {
-			cmNamespace := config.ConfigMapRef.Namespace
+			cmRef := config.ConfigMapRef
+			customerCM := &corev1.ConfigMap{}
+			cmNamespace := cmRef.Namespace
 			if cmNamespace == "" {
 				cmNamespace = cms.Namespace
 			}
-			customerCM := &corev1.ConfigMap{}
-			if err := h.Client.Get(ctx, types.NamespacedName{Name: config.ConfigMapRef.Name, Namespace: cmNamespace}, customerCM); err != nil {
-				return "", fmt.Errorf("failed to get customer sidecar configmap: %v", err)
-			}
-			if containerData, exists := customerCM.Data["reload-sidecar"]; exists {
-				var container corev1.Container
-				if err := json.Unmarshal([]byte(containerData), &container); err == nil && container.Name != "" {
-					return container.Name, nil
+			if err := h.Client.Get(ctx, types.NamespacedName{Name: cmRef.Name, Namespace: cmNamespace}, customerCM); err == nil {
+				if containerData, exists := customerCM.Data["reload-sidecar"]; exists {
+					var reloadSidecar corev1.Container
+					if unmarshalErr := json.Unmarshal([]byte(containerData), &reloadSidecar); unmarshalErr == nil {
+						if reloadSidecar.Name != "" {
+							return reloadSidecar.Name, nil
+						}
+					}
 				}
 			}
+			return fmt.Sprintf("custom-sidecar-%s", cms.Name), nil
 		}
 	}
 	return configmapset.GetConfigMapSetDefaultSidecarName(cms.Name), nil
@@ -619,6 +623,7 @@ func (h *PodCreateHandler) handlePodRevisionAnnotations(ctx context.Context, pod
 
 	now := time.Now().Format("2006-01-02 15:04:05")
 
+	// Strategy 1: Prioritize using CurrentRevision. If empty, it means this is the first release, so use the target version calculated from Data.
 	targetVersion := cms.Status.CurrentRevision
 	if targetVersion == "" {
 		hash, err := configmapset.CalculateHash(cms.Spec.Data)
@@ -640,7 +645,7 @@ func (h *PodCreateHandler) handlePodRevisionAnnotations(ctx context.Context, pod
 		pod.Annotations[containerRestartKey] = targetVersion
 	}
 
-	// 将 PostHook 配置注入到 Pod Annotations 中
+	// Inject PostHook config into Pod Annotations
 	if cms.Spec.EffectPolicy != nil && cms.Spec.EffectPolicy.Type == appsv1alpha1.EffectPolicyTypePostHook && cms.Spec.EffectPolicy.PostHook != nil {
 		hookConfigBytes, err := json.Marshal(cms.Spec.EffectPolicy.PostHook)
 		if err == nil {

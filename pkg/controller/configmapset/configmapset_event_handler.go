@@ -16,7 +16,7 @@ import (
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 )
 
-// cms事件处理
+// ConfigMapSet event handler
 type configMapSetEventHandler struct {
 	client.Reader
 }
@@ -64,7 +64,7 @@ func (e *configMapSetEventHandler) handleUpdate(cms, oldCms *appsv1alpha1.Config
 	e.handle(cms, q)
 }
 
-// pod事件处理
+// Pod event handler
 type podEventHandler struct {
 	client.Reader
 }
@@ -81,7 +81,7 @@ func (p *podEventHandler) Create(ctx context.Context, evt event.TypedCreateEvent
 }
 func (p *podEventHandler) Update(ctx context.Context, evt event.TypedUpdateEvent[*v1.Pod], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 	obj := evt.ObjectNew
-	// 不处理正在terminating的pod
+	// Do not process terminating pods
 	if obj.DeletionTimestamp != nil {
 		klog.Infof("Pod %s/%s is terminating, skip", obj.Namespace, obj.Name)
 		return
@@ -115,7 +115,7 @@ func (p *podEventHandler) handle(pod *v1.Pod, q workqueue.TypedRateLimitingInter
 		return
 	}
 	if len(cmsList) > 0 {
-		// 每一个都要加
+		// Add to queue for each one
 		for _, cms := range cmsList {
 			klog.Infof("Pod %s/%s update ConfigMapSet %s", pod.Namespace, pod.Name, cms.Name)
 			q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Namespace: cms.Namespace, Name: cms.Name}})

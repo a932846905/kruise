@@ -179,10 +179,10 @@ func TestGetUpdatePodsByDistributions(t *testing.T) {
 		{Hash: updateRev},
 	}
 
-	// 1. 存在于RMC的版本：oldestRev, olderRev, currentRev, updateRev
-	// 2. 不存在于RMC的版本：unknownRev
+	// 1. Revisions in RMC: oldestRev, olderRev, currentRev, updateRev
+	// 2. Revisions not in RMC: unknownRev
 
-	// 构造不同状态的Pod
+	// Construct Pods with different states
 	createPod := func(name, rev string, creationTime metav1.Time, ready bool) *corev1.Pod {
 		status := corev1.ConditionFalse
 		if ready {

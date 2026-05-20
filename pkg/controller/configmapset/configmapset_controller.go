@@ -90,6 +90,7 @@ type SpecForHash struct {
 	RevisionHistoryLimit *int32                               `json:"revisionHistoryLimit,omitempty"`
 }
 
+// UpdateInfo stores the result of pod update calculation
 type UpdateInfo struct {
 	PodsToUpdate         []*corev1.Pod
 	TargetRevisions      []string
@@ -100,7 +101,7 @@ const (
 	ConfigMapFinalizerName = "finalizer.configmapset.kruise.io"
 )
 
-// RevisionEntry 定义存储 revisions 的数据结构
+// RevisionEntry defines the data structure for storing revisions
 type RevisionEntry struct {
 	Hash          string            `json:"hash"`
 	CustomVersion string            `json:"customVersion"`
@@ -207,7 +208,7 @@ func (r *ReconcileConfigMapSet) Reconcile(ctx context.Context, request reconcile
 		return reconcile.Result{}, nil
 	}
 
-	// 添加 Finalizer（如果还没有）
+	// Add Finalizer (if not present)
 	if !containsString(cms.Finalizers, ConfigMapFinalizerName) {
 		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			latest := &appsv1alpha1.ConfigMapSet{}
@@ -237,7 +238,7 @@ func (r *ReconcileConfigMapSet) Reconcile(ctx context.Context, request reconcile
 		return reconcile.Result{}, fmt.Errorf("GetMatchedPods failed for cms %s/%s: %w", cms.Namespace, cms.Name, err)
 	}
 
-	// Pod同步
+	// Sync Pods
 	requeue, err := r.SyncPods(ctx, cms, pods)
 	if err != nil {
 		return reconcile.Result{}, fmt.Errorf("syncPods failed for cms %s/%s: %w", cms.Namespace, cms.Name, err)
@@ -248,7 +249,7 @@ func (r *ReconcileConfigMapSet) Reconcile(ctx context.Context, request reconcile
 		return reconcile.Result{RequeueAfter: 3 * time.Second}, nil
 	}
 
-	// 更新状态
+	// Update status
 	err = r.updateStatus(ctx, request, cms)
 	if err != nil {
 		return reconcile.Result{}, fmt.Errorf("updateStatus failed for cms %s/%s: %w", cms.Namespace, cms.Name, err)
@@ -270,33 +271,32 @@ func (r *ReconcileConfigMapSet) cleanupConfigMap(ctx context.Context, cms *appsv
 	return r.Delete(ctx, cm)
 }
 
-// CalculateHash 计算对象的哈希值
+// CalculateHash computes the hash of an object
 func CalculateHash(v interface{}) (string, error) {
 	if v == nil {
 		return "", fmt.Errorf("object is nil")
 	}
-	// 1. 将 spec 序列化为 JSON
+	// 1. Marshal spec to JSON
 	specBytes, err := json.Marshal(v)
 	if err != nil {
-		// 这里的 panic 主要是为了确保 JSON 序列化不会失败，正常情况下不会触发
 		return "", fmt.Errorf("failed to marshal spec: %v", err)
 	}
 
-	// 2. 计算 SHA256 哈希
+	// 2. Compute SHA256 hash
 	hash := sha256.Sum256(specBytes)
 
-	// 3. 返回十六进制编码的哈希值
-	return hex.EncodeToString(hash[:8]), nil // 取前 8 字节作为短哈希
+	// 3. Return hexadecimal encoded hash string (first 8 bytes for short hash)
+	return hex.EncodeToString(hash[:8]), nil
 }
 
-// 版本管理逻辑
+// syncRevisions manages version history
 func (r *ReconcileConfigMapSet) syncRevisions(ctx context.Context, cms *appsv1alpha1.ConfigMapSet) error {
 	hash, err := CalculateHash(cms.Spec.Data)
 	if err != nil {
 		return fmt.Errorf("failed to compute hash: %v", err)
 	}
 
-	// ConfigMap 命名：cms.Name + "-hub"
+	// ConfigMap name: cms.Name + "-hub"
 	cmName := fmt.Sprintf("%s-%s", strings.ToLower(cms.Name), "hub")
 	cmNamespace := cms.Namespace
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -347,13 +347,13 @@ func (r *ReconcileConfigMapSet) syncRevisions(ctx context.Context, cms *appsv1al
 		if err != nil {
 			return fmt.Errorf("failed to marshal revisions: %v", err)
 		}
-		cm = cm.DeepCopy() // 避免修改缓存对象
+		cm = cm.DeepCopy() // Avoid modifying the cached object
 		if cm.Data == nil {
 			cm.Data = make(map[string]string)
 		}
 		cm.Data["revisions"] = string(revBytes)
 
-		// 更新 ConfigMap
+		// Update ConfigMap
 		return r.Update(ctx, cm)
 	})
 }
@@ -383,14 +383,14 @@ func (r *ReconcileConfigMapSet) SyncPods(ctx context.Context, cms *appsv1alpha1.
 		UpdateCustomVersionKey:      GetConfigMapSetUpdateCustomVersionKey(cms.Name),
 		UpdateRevisionTimeStampKey:  GetConfigMapSetUpdateRevisionTimeStampKey(cms.Name),
 	}
-	// 加载 hub ConfigMap 中的版本列表，用于 Pod 选择优先级排序
+	// Load the version list from the hub ConfigMap for Pod selection priority sorting
 	hubRevisions, err := r.getHubRevisions(ctx, cms)
 	if err != nil {
 		klog.Errorf("Failed to load hub revisions for ConfigMapSet %s/%s: %v, pod selection priority rules 2&3 will be degraded", cms.Namespace, cms.Name, err)
 		return false, err
 	}
 
-	// 根据更新策略选择要更新的Pod
+	// Select Pods to update based on the update strategy
 	updateStrategy := cms.Spec.UpdateStrategy
 
 	requeue := false
@@ -428,13 +428,13 @@ type Distribution struct {
 }
 
 func getDistributionByPartition(cms *appsv1alpha1.ConfigMapSet, pods []*corev1.Pod) ([]Distribution, error) {
-	// 总副本数 = 传入的pod数
+	// Total replicas = number of passed pods
 	replicas := len(pods)
-	// 解析 partition
+	// Parse partition
 	partition := cms.Spec.UpdateStrategy.Partition
 
-	// 由于syncPods在updateStatus之前, 这里需要计算当前最新的updateRevision
-	updateRevision, err := CalculateHash(cms.Spec.Data) // 计算当前版本
+	// Calculate the latest updateRevision here since syncPods is called before updateStatus
+	updateRevision, err := CalculateHash(cms.Spec.Data) // Calculate current version
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute hash for cms %s/%s: %w", cms.Namespace, cms.Name, err)
 	}
@@ -442,11 +442,11 @@ func getDistributionByPartition(cms *appsv1alpha1.ConfigMapSet, pods []*corev1.P
 	currentRevision := cms.Status.CurrentRevision
 	currentCustomVersion := cms.Status.CurrentCustomVersion
 
-	newReplicas := replicas // 新实例数
+	newReplicas := replicas // New replicas count
 	if partition != nil {
 		partitionStr := partition.String()
 		if strings.HasSuffix(partitionStr, "%") {
-			// 处理百分比 partition
+			// Handle percentage partition
 			percentStr := strings.TrimSuffix(partitionStr, "%")
 			percent, err := strconv.Atoi(percentStr)
 			if err != nil || percent < 0 || percent > 100 {
@@ -454,16 +454,16 @@ func getDistributionByPartition(cms *appsv1alpha1.ConfigMapSet, pods []*corev1.P
 			}
 			newReplicas = replicas - int(math.Ceil(float64(percent)/100.0*float64(replicas)))
 		} else if count, err := strconv.Atoi(partitionStr); err == nil && count >= 0 {
-			// 处理整数 partition
+			// Handle integer partition
 			newReplicas = replicas - count
-			if newReplicas < 0 { // 不能出现负数
+			if newReplicas < 0 { // Cannot be negative
 				newReplicas = 0
 			}
 		} else {
 			return nil, fmt.Errorf("invalid partition number: %s", partitionStr)
 		}
 	}
-	// 构造distribution
+	// Construct distribution
 	distributions := make([]Distribution, 2)
 	distributions[0] = Distribution{
 		Revision:      updateRevision,
@@ -481,7 +481,7 @@ func getDistributionByPartition(cms *appsv1alpha1.ConfigMapSet, pods []*corev1.P
 }
 
 func getUpdateInfoByDistribution(cms *appsv1alpha1.ConfigMapSet, distributions []Distribution, pods []*corev1.Pod, revisionKeys *RevisionKeys, hubRevisions []RevisionEntry) (*UpdateInfo, error) {
-	// 收集待更新 pod（多余版本 -> 目标版本）
+	// Collect pods to update (excess version -> target version)
 	var podsToUpdate []*corev1.Pod
 	targetRevisions := make([]string, 0)
 	targetCustomVersions := make([]string, 0)
@@ -550,7 +550,7 @@ func getUpdatePodsByDistributions(cms *appsv1alpha1.ConfigMapSet, distributions 
 		return podsToUpdate, targetRevisions, targetCustomVersions
 	}
 
-	// 构建 hub revision 索引：hash -> 在 hub 中的位置（越小越旧）
+	// Build hub revision index: hash -> position in hub (smaller is older)
 	hubRevisionIndex := make(map[string]int, len(hubRevisions))
 	for idx, rev := range hubRevisions {
 		hubRevisionIndex[rev.Hash] = idx
@@ -585,7 +585,7 @@ func getUpdatePodsByDistributions(cms *appsv1alpha1.ConfigMapSet, distributions 
 			idxI, inRMCI := hubRevisionIndex[revI]
 			idxJ, inRMCJ := hubRevisionIndex[revJ]
 
-			// 3. 不存在于 RMC 的版本 > 存在于 RMC 的版本
+			// 3. Not in RMC > In RMC
 			if !inRMCI && inRMCJ {
 				return true
 			}
@@ -593,7 +593,7 @@ func getUpdatePodsByDistributions(cms *appsv1alpha1.ConfigMapSet, distributions 
 				return false
 			}
 
-			// 2. 序号小的版本（更旧）> 序号大的版本（更新）
+			// 2. Smaller index (older) > Larger index (newer)
 			if inRMCI && inRMCJ && idxI != idxJ {
 				return idxI < idxJ
 			}
@@ -661,15 +661,21 @@ func (r *ReconcileConfigMapSet) getReloadSidecarName(ctx context.Context, cms *a
 	return expectedSidecarName
 }
 
+// UpdateByDistribution updates pods based on the distribution
 func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *appsv1alpha1.ConfigMapSet, distributions []Distribution, pods []*corev1.Pod, revisionKeys *RevisionKeys, hubRevisions []RevisionEntry) (bool, error) {
+	// Step 1: Calculate the current version distribution and the update version queue
 	updateInfo, err := getUpdateInfoByDistribution(cms, distributions, pods, revisionKeys, hubRevisions)
 	if err != nil {
 		klog.Errorf("failed to fetch update info: %v", err)
 		return false, err
 	}
 
+	// Step 2: Trigger updates
 	requeue := false
 	for i, pod := range updateInfo.PodsToUpdate {
+		if i >= len(updateInfo.TargetRevisions) || i >= len(updateInfo.TargetCustomVersions) {
+			break
+		}
 		if pod == nil || !controller.IsPodActive(pod) {
 			continue
 		}
@@ -891,26 +897,26 @@ func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *a
 	return requeue, nil
 }
 
-// updateStatus 更新cms的status字段
+// updateStatus updates the status field of cms
 func (r *ReconcileConfigMapSet) updateStatus(ctx context.Context, request reconcile.Request, cms *appsv1alpha1.ConfigMapSet) error {
 	klog.Infof("Updating status for ConfigMapSet %s/%s", cms.Namespace, cms.Name)
-	// 获取关联Pod列表
+	// Get matched Pod list
 	pods, err := GetMatchedPods(ctx, r.Client, cms)
 	if err != nil {
 		return err
 	}
 	var updateRevision string
 	var updatedPodsNum, readyPodsNum, updatedReadyPodsNum int32
-	// apps.kruise.io/configmapset.configMapSet名称.revision
+	// apps.kruise.io/configmapset.configMapSetName.revision
 	targetRevisionKey := GetConfigMapSetUpdateRevisionKey(cms.Name)
 	currentRevisionKey := GetConfigMapSetCurrentRevisionKey(cms.Name)
 
-	updateRevision, err = CalculateHash(cms.Spec.Data) // 计算当前版本
+	updateRevision, err = CalculateHash(cms.Spec.Data) // Calculate current version
 	if err != nil {
 		return fmt.Errorf("failed to compute hash for cms %s/%s: %w", cms.Namespace, cms.Name, err)
 	}
 
-	// 计算状态指标
+	// Calculate status metrics
 	for _, pod := range pods {
 		if pod.Annotations[targetRevisionKey] == updateRevision && pod.Annotations[currentRevisionKey] == updateRevision {
 			updatedPodsNum++
@@ -937,13 +943,13 @@ func (r *ReconcileConfigMapSet) updateStatus(ctx context.Context, request reconc
 		return nil
 	}
 
-	// 更新ConfigMapSet状态
-	// 所有pod都是最新版以后才能更新currentRevision
-	// 如果cms是第一次发版, 就使用当前版本
+	// Update ConfigMapSet status
+	// currentRevision can only be updated after all pods are at the latest version
+	// If it is the first release of cms, use the current version
 	if updatedReadyPodsNum == int32(len(pods)) || cms.Status.CurrentRevision == "" {
 		cms.Status.CurrentRevision = updateRevision
 		cms.Status.CurrentCustomVersion = cms.Spec.CustomVersion
-		// 仅在所有pod都更新到一个版本以后进行版本维护
+		// Manage version history only after all pods are updated to a version
 		err = r.cleanHistoryRevision(ctx, cms)
 	}
 	cms.Status.ObservedGeneration = cms.Generation
@@ -953,7 +959,7 @@ func (r *ReconcileConfigMapSet) updateStatus(ctx context.Context, request reconc
 	cms.Status.ReadyReplicas = readyPodsNum
 	cms.Status.UpdatedReplicas = updatedPodsNum
 	cms.Status.UpdatedReadyReplicas = updatedReadyPodsNum
-	// 根据更新策略计算 ExpectedUpdatedReplicas
+	// Calculate ExpectedUpdatedReplicas based on update strategy
 	expected := int32(len(pods))
 	if cms.Spec.UpdateStrategy.Partition != nil {
 		partitionStr := cms.Spec.UpdateStrategy.Partition.String()
@@ -971,28 +977,28 @@ func (r *ReconcileConfigMapSet) updateStatus(ctx context.Context, request reconc
 	}
 	cms.Status.ExpectedUpdatedReplicas = expected
 
-	// 将更新同步到 etcd
+	// Sync status to etcd
 	klog.Infof("Updating cms %s status %#v", cms.Name, cms.Status)
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// 获取最新的对象
+		// Fetch the latest object
 		latest := &appsv1alpha1.ConfigMapSet{}
 		if err := r.Get(context.TODO(), request.NamespacedName, latest); err != nil {
 			utilruntime.HandleError(fmt.Errorf("error getting latest configmapset %s/%s: %v", cms.Namespace, cms.Name, err))
 			return err
 		}
 
-		// 更新 Status 字段
+		// Update Status fields
 		latest.Status = cms.Status
 
 		klog.Info("Before update, RV:", latest.ResourceVersion)
 
-		// 执行 Status 更新
+		// Execute Status update
 		if err := r.Status().Update(context.TODO(), latest); err != nil {
 			utilruntime.HandleError(fmt.Errorf("error updating configmapset status %s/%s: %v", cms.Namespace, cms.Name, err))
 			return err
 		}
 
-		// 打印更新后的 ResourceVersion
+		// Log the updated ResourceVersion
 		klog.Infof("Updated cms %s status successfully, new ResourceVersion: %s", latest.Name, latest.ResourceVersion)
 		return nil
 	})
@@ -1004,13 +1010,13 @@ func (r *ReconcileConfigMapSet) cleanHistoryRevision(ctx context.Context, cms *a
 
 	var revisions []RevisionEntry
 
-	// 定义更新逻辑
+	// Define update logic
 	updateFunc := func() error {
-		// 重新获取最新的 ConfigMap，避免并发冲突
+		// Fetch the latest ConfigMap again to avoid concurrent conflicts
 		cm := &corev1.ConfigMap{}
 		if err := r.Get(ctx, types.NamespacedName{Name: cmName, Namespace: cmNamespace}, cm); err != nil {
 			if errors.IsNotFound(err) {
-				// 如果 ConfigMap 不存在，则创建
+				// Create if ConfigMap does not exist
 				newCM := &corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      cmName,
@@ -1023,7 +1029,7 @@ func (r *ReconcileConfigMapSet) cleanHistoryRevision(ctx context.Context, cms *a
 			return fmt.Errorf("failed to get ConfigMap: %v", err)
 		}
 
-		// 解析现有 ConfigMap 的 revisions
+		// Parse existing revisions from ConfigMap
 		if revData, exists := cm.Data["revisions"]; exists {
 			if err := json.Unmarshal([]byte(revData), &revisions); err != nil {
 				klog.Errorf("Failed to unmarshal revisions from ConfigMap %s: %v, resetting revisions", cmName, err)
@@ -1031,7 +1037,7 @@ func (r *ReconcileConfigMapSet) cleanHistoryRevision(ctx context.Context, cms *a
 			}
 		}
 
-		// 如果配置版本数量达到了 Limit，移除没有 Pod 在使用的最旧一个版本
+		// If the number of revisions reaches the limit, remove the oldest one that is not used by any Pod
 		if cms.Spec.RevisionHistoryLimit != nil && int32(len(revisions)) >= *cms.Spec.RevisionHistoryLimit {
 			pods, podErr := GetMatchedPods(ctx, r.Client, cms)
 			if podErr != nil {
@@ -1044,34 +1050,45 @@ func (r *ReconcileConfigMapSet) cleanHistoryRevision(ctx context.Context, cms *a
 					revisionsInUse[pod.Annotations[currentRevisionKey]] = true
 				}
 			}
-			// 从最旧的开始找到第一个没有 Pod 使用的版本并移除
+			// Find the oldest revision that is not in use
+			oldestUnusedIdx := -1
 			for i, rev := range revisions {
 				if !revisionsInUse[rev.Hash] {
-					klog.Infof("Removing oldest unused revision %s (customVersion=%s) from hub to maintain limit %d", rev.Hash, rev.CustomVersion, *cms.Spec.RevisionHistoryLimit)
-					revisions = append(revisions[:i], revisions[i+1:]...)
+					oldestUnusedIdx = i
 					break
 				}
 			}
+
+			// If all revisions are in use, do not remove any
+			if oldestUnusedIdx == -1 {
+				klog.Warningf("All revisions are currently in use, skipping cleanup for ConfigMapSet %s/%s", cms.Namespace, cms.Name)
+				return nil
+			}
+
+			// Remove the oldest unused revision
+			revToRemove := revisions[oldestUnusedIdx]
+			klog.Infof("Removing oldest unused revision %s (customVersion=%s) from hub to maintain limit %d", revToRemove.Hash, revToRemove.CustomVersion, *cms.Spec.RevisionHistoryLimit)
+			revisions = append(revisions[:oldestUnusedIdx], revisions[oldestUnusedIdx+1:]...)
 		}
 
 		klog.Infof("Updated revisions for ConfigMapSet %s/%s: %v", cms.Namespace, cms.Name, revisions)
 
-		// 更新 ConfigMap Data
+		// Update ConfigMap Data
 		revBytes, err := json.Marshal(revisions)
 		if err != nil {
 			return fmt.Errorf("failed to marshal revisions: %v", err)
 		}
-		cm = cm.DeepCopy() // 避免修改缓存对象
+		cm = cm.DeepCopy() // Avoid modifying the cached object
 		if cm.Data == nil {
 			cm.Data = make(map[string]string)
 		}
 		cm.Data["revisions"] = string(revBytes)
 
-		// 更新 ConfigMap
+		// Update ConfigMap
 		return r.Update(ctx, cm)
 	}
 
-	// 使用 `retry.RetryOnConflict` 处理更新冲突
+	// Use `retry.RetryOnConflict` to handle update conflicts
 	err := retry.RetryOnConflict(retry.DefaultRetry, updateFunc)
 	if err != nil {
 		return fmt.Errorf("failed to update ConfigMap %s: %v", cmName, err)

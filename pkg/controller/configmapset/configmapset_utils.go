@@ -154,8 +154,8 @@ func removeString(slice []string, str string) []string {
 }
 
 func GetMatchedPods(ctx context.Context, reader client.Reader, cms *appsv1alpha1.ConfigMapSet) ([]*corev1.Pod, error) {
-	// 通过spec.selector获取关联Pod
-	// 获取匹配的pods
+	// Get related Pods by spec.selector
+	// Get matched pods
 	podList := &corev1.PodList{}
 	labelSelector, err := metav1.LabelSelectorAsSelector(cms.Spec.Selector)
 	if err != nil {
@@ -166,7 +166,7 @@ func GetMatchedPods(ctx context.Context, reader client.Reader, cms *appsv1alpha1
 	}
 	opts := &client.ListOptions{
 		Namespace:     cms.Namespace,
-		LabelSelector: labelSelector, // 使用转换后的 LabelSelector
+		LabelSelector: labelSelector, // Use converted LabelSelector
 	}
 	err = reader.List(ctx, podList, opts)
 	if err != nil {
@@ -176,17 +176,19 @@ func GetMatchedPods(ctx context.Context, reader client.Reader, cms *appsv1alpha1
 		return nil, fmt.Errorf("failed to list pods: %v", err)
 	}
 
-	// 过滤不活跃的pod, 新启动的pod不会被过滤
+	// Filter inactive pods, newly started pods will not be filtered
 	matchedPods := make([]*corev1.Pod, 0)
 	klog.Infof("total pods: %d", len(podList.Items))
-	for _, pod := range podList.Items {
-		// filter not active Pod if active is true.
+	for i, pod := range podList.Items {
 		if !kubecontroller.IsPodActive(&pod) {
-			klog.Infof("pod %s/%s is not active, skip", pod.Namespace, pod.Name)
-			klog.Infof("pod %s/%s 's deletion timestamp: %v", pod.Namespace, pod.Name, pod.DeletionTimestamp)
+			klog.V(4).Infof("Pod %s/%s is not active, skipping", pod.Namespace, pod.Name)
 			continue
 		}
-		matchedPods = append(matchedPods, &pod)
+		if pod.DeletionTimestamp != nil {
+			klog.V(4).Infof("Pod %s/%s is being deleted, skipping", pod.Namespace, pod.Name)
+			continue
+		}
+		matchedPods = append(matchedPods, &podList.Items[i])
 	}
 
 	return matchedPods, nil
@@ -204,22 +206,22 @@ func IsPodReady(pod *corev1.Pod) bool {
 func GetMatchConfigMapSets(reader client.Reader, pod *corev1.Pod) ([]*appsv1alpha1.ConfigMapSet, error) {
 	res := make([]*appsv1alpha1.ConfigMapSet, 0)
 
-	// 查询 ConfigMapSet 对象
+	// Query ConfigMapSet objects
 	configMapSets := &appsv1alpha1.ConfigMapSetList{}
 	err := reader.List(context.Background(), configMapSets, &client.ListOptions{
 		Namespace: pod.Namespace,
 	})
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return res, nil // 有些pod就是没有cms的, 不要报错
+			return res, nil // Some pods may not have cms, do not return error
 		}
 		return nil, fmt.Errorf("failed to list ConfigMapSets in namespace %s: %v", pod.Namespace, err)
 	}
 
-	// 查找与 Pod 标签匹配的 ConfigMapSet
-	// 可能有多个
+	// Find ConfigMapSets that match the Pod's labels
+	// There may be multiple
 	for i := range configMapSets.Items {
-		cms := configMapSets.Items[i] // 取地址前，先取实际元素
+		cms := configMapSets.Items[i] // Get actual element before taking address
 		if cms.DeletionTimestamp != nil {
 			continue
 		}
@@ -228,7 +230,7 @@ func GetMatchConfigMapSets(reader client.Reader, pod *corev1.Pod) ([]*appsv1alph
 			return nil, fmt.Errorf("invalid label selector for ConfigMapSet %s: %v", cms.Name, err)
 		}
 		if ls.Matches(labels.Set(pod.Labels)) {
-			res = append(res, &cms) // 这里的 cms 现在是独立的
+			res = append(res, &cms) // The cms here is now independent
 		}
 	}
 
@@ -290,8 +292,8 @@ func podGroupKey(pod *corev1.Pod, matchLabelKeys []string) string {
 }
 
 func getMatchedPods(reader client.Reader, cms *appsv1alpha1.ConfigMapSet) (*corev1.PodList, error) {
-	// 通过spec.selector获取关联Pod
-	// 获取匹配的pods
+	// Get related Pods by spec.selector
+	// Get matched pods
 	pods := &corev1.PodList{}
 	labelSelector, err := metav1.LabelSelectorAsSelector(cms.Spec.Selector)
 	if err != nil {
@@ -299,7 +301,7 @@ func getMatchedPods(reader client.Reader, cms *appsv1alpha1.ConfigMapSet) (*core
 	}
 	err = reader.List(context.Background(), pods, &client.ListOptions{
 		Namespace:     cms.Namespace,
-		LabelSelector: labelSelector, // 使用转换后的 LabelSelector
+		LabelSelector: labelSelector, // Use converted LabelSelector
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pods: %v", err)
