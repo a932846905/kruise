@@ -18,8 +18,6 @@ package mutating
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -172,18 +170,40 @@ func (h *PodCreateHandler) injectSidecar4Pod(ctx context.Context, pod *corev1.Po
 	configMapName := configmapset.GetConfigMapSetHubName(cms.Name)
 	defaultSidecarName := configmapset.GetConfigMapSetDefaultSidecarName(cms.Name)
 	volumeName := configmapset.GetConfigMapSetVolumeName(cms.Name)
-	restartKey := configmapset.GetConfigMapSetReloadSidecarRestartKey(cms.Name)
-	envName := configmapset.GetConfigMapSetEnvRestartAnnotationName(cms.Name)
 
+	// get share path in reload-sidecar
 	configMountPath := configmapset.GetConfigMapSetConfigMountPath(cms.Name)
+	// get configmap mount path in reload-sidecar
 	configMapMountPath := configmapset.GetConfigMapSetConfigMapMountPath(cms.Name)
-
+	// build configmap volume with reload-sidecar
 	configMapVolume := corev1.Volume{
 		Name: configMapName + "-volume",
 		VolumeSource: corev1.VolumeSource{
 			ConfigMap: &corev1.ConfigMapVolumeSource{
 				LocalObjectReference: corev1.LocalObjectReference{
 					Name: configMapName,
+				},
+			},
+		},
+	}
+	// build downward api volume with reload-sidecar
+	podInfoVolume := corev1.Volume{
+		Name: "cms-podinfo",
+		VolumeSource: corev1.VolumeSource{
+			DownwardAPI: &corev1.DownwardAPIVolumeSource{
+				Items: []corev1.DownwardAPIVolumeFile{
+					{
+						Path: "annotations",
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.annotations",
+						},
+					},
+					{
+						Path: "labels",
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.labels",
+						},
+					},
 				},
 			},
 		},
@@ -195,16 +215,9 @@ func (h *PodCreateHandler) injectSidecar4Pod(ctx context.Context, pod *corev1.Po
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: volumeName, MountPath: configMountPath},
 			{Name: configMapVolume.Name, MountPath: configMapMountPath},
-			{Name: "podinfo", MountPath: "/etc/podinfo"},
+			{Name: podInfoVolume.Name, MountPath: "/etc/podinfo"},
 		},
 		Env: []corev1.EnvVar{{
-			Name: envName,
-			ValueFrom: &corev1.EnvVarSource{ // 可以支持原地升级
-				FieldRef: &corev1.ObjectFieldSelector{
-					FieldPath: configmapset.GetConfigMapSetEnvFieldPath(restartKey),
-				},
-			},
-		}, {
 			Name:  configmapset.GetConfigMapSetEnvConfigPathName(cms.Name),
 			Value: configMapMountPath,
 		}, {
@@ -316,11 +329,10 @@ func (h *PodCreateHandler) injectSidecar4Pod(ctx context.Context, pod *corev1.Po
 		pod.Spec.Containers = append([]corev1.Container{*reloadSidecar}, pod.Spec.Containers...)
 	}
 
-	return h.injectVolumes(pod, configMapVolume)
+	return h.injectVolumes(pod, configMapVolume, podInfoVolume)
 }
 
-func (h *PodCreateHandler) injectVolumes(pod *corev1.Pod, configMapVolume corev1.Volume) error {
-	// 避免重复添加volume
+func (h *PodCreateHandler) injectVolumes(pod *corev1.Pod, configMapVolume corev1.Volume, podInfoVolume corev1.Volume) error {
 	volumeExistingIdx := -1
 	for i, vol := range pod.Spec.Volumes {
 		if vol.Name == configMapVolume.Name {
@@ -334,21 +346,6 @@ func (h *PodCreateHandler) injectVolumes(pod *corev1.Pod, configMapVolume corev1
 		pod.Spec.Volumes = append(pod.Spec.Volumes, configMapVolume)
 	}
 
-	podInfoVolume := corev1.Volume{
-		Name: "podinfo",
-		VolumeSource: corev1.VolumeSource{
-			DownwardAPI: &corev1.DownwardAPIVolumeSource{
-				Items: []corev1.DownwardAPIVolumeFile{
-					{
-						Path: "annotations",
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: "metadata.annotations",
-						},
-					},
-				},
-			},
-		},
-	}
 	podInfoVolumeExistingIdx := -1
 	for i, vol := range pod.Spec.Volumes {
 		if vol.Name == podInfoVolume.Name {
@@ -392,7 +389,7 @@ func (h *PodCreateHandler) injectEmptyDir4Pod(pod *corev1.Pod, cms *appsv1alpha1
 		containerName := configmapset.GetContainerName(pod, injectC)
 		for i, c := range pod.Spec.Containers {
 			if containerName == c.Name {
-				h.applyVM4Container(pod, &c, injectC, volume.Name, cms)
+				h.applyVM4Container(&c, injectC, volume.Name)
 				pod.Spec.Containers[i] = c
 				break
 			}
@@ -401,45 +398,7 @@ func (h *PodCreateHandler) injectEmptyDir4Pod(pod *corev1.Pod, cms *appsv1alpha1
 	return nil
 }
 
-func (h *PodCreateHandler) applyVM4Container(pod *corev1.Pod, c *corev1.Container, v appsv1alpha1.ConfigMapSetContainer, volumeName string, cms *appsv1alpha1.ConfigMapSet) {
-	// 为业务容器注入用于重启的环境变量，每个容器使用独立的 Annotation Key
-	restartAnnotationKey := configmapset.GetConfigMapSetContainerRestartKey(cms.Name, c.Name)
-	targetRevisionKey := configmapset.GetConfigMapSetUpdateRevisionKey(cms.Name)
-	if pod.Annotations == nil {
-		pod.Annotations = make(map[string]string)
-	}
-	if pod.Annotations[restartAnnotationKey] == "" {
-		// 初始化时使用 md5(pod.Name + "0")，与 Controller 逻辑保持结构一致
-		// 由于 mutating 阶段 Pod Name 可能还未分配（例如通过 GenerateName 创建），如果为空则使用固定值或 "0" 的 md5
-		podNameForHash := pod.Name
-		if podNameForHash == "" {
-			podNameForHash = "unnamed"
-		}
-		hashBytes := md5.Sum([]byte(podNameForHash + pod.Annotations[targetRevisionKey]))
-		hashStr := hex.EncodeToString(hashBytes[:])
-		pod.Annotations[restartAnnotationKey] = hashStr
-	}
-
-	envName := configmapset.GetConfigMapSetEnvRestartAnnotationName(cms.Name)
-	envFound := false
-	for _, env := range c.Env {
-		if env.Name == envName {
-			envFound = true
-			break
-		}
-	}
-	if !envFound {
-		c.Env = append(c.Env, corev1.EnvVar{
-			Name: envName,
-			ValueFrom: &corev1.EnvVarSource{
-				FieldRef: &corev1.ObjectFieldSelector{
-					FieldPath: configmapset.GetConfigMapSetEnvFieldPath(restartAnnotationKey),
-				},
-			},
-		})
-	}
-
-	// 检查c里面是否已经有同名的volumeMount了
+func (h *PodCreateHandler) applyVM4Container(c *corev1.Container, v appsv1alpha1.ConfigMapSetContainer, volumeName string) {
 	for i := range c.VolumeMounts {
 		if c.VolumeMounts[i].Name == volumeName {
 			// 修改vm挂载的路径即可
@@ -503,7 +462,7 @@ func (h *PodCreateHandler) configMapSetMutatingPod(ctx context.Context, req admi
 			return false, fmt.Errorf("handle revision annotations for pod %s/%s failed, error : %v", pod.Namespace, pod.Name, err)
 		}
 
-		// 注入 emptyDir
+		// inject share emptyDir volume
 		klog.Infof("inject emptyDir for pod %s/%s", pod.Namespace, pod.Name)
 		err = h.injectEmptyDir4Pod(pod, cms)
 		if err != nil {
@@ -511,7 +470,7 @@ func (h *PodCreateHandler) configMapSetMutatingPod(ctx context.Context, req admi
 			return false, fmt.Errorf("inject emptyDir for pod %s/%s failed, error : %v", pod.Namespace, pod.Name, err)
 		}
 
-		// 注入 sidecar 容器
+		// inject reload sidecar
 		klog.Infof("inject sidecar for pod %s/%s", pod.Namespace, pod.Name)
 		err = h.injectSidecar4Pod(ctx, pod, cms)
 		if err != nil {
@@ -604,55 +563,31 @@ func (h *PodCreateHandler) getReloadSidecarName(ctx context.Context, cms *appsv1
 }
 
 func (h *PodCreateHandler) handlePodRevisionAnnotations(ctx context.Context, pod *corev1.Pod, cms *appsv1alpha1.ConfigMapSet) error {
-	updateRevision, err := configmapset.CalculateHash(cms.Spec.Data)
-	if err != nil {
-		return fmt.Errorf("failed to compute hash for cms %s/%s: %w", cms.Namespace, cms.Name, err)
-	}
-
 	targetRevisionKey := configmapset.GetConfigMapSetUpdateRevisionKey(cms.Name)
 	currentRevisionKey := configmapset.GetConfigMapSetCurrentRevisionKey(cms.Name)
 	targetCustomVersionKey := configmapset.GetConfigMapSetUpdateCustomVersionKey(cms.Name)
 	currentCustomVersionKey := configmapset.GetConfigMapSetCurrentCustomVersionKey(cms.Name)
 	currentRevisionTimestampKey := configmapset.GetConfigMapSetCurrentRevisionTimeStampKey(cms.Name)
 	updateRevisionTimestampKey := configmapset.GetConfigMapSetUpdateRevisionTimeStampKey(cms.Name)
-	restartKey := configmapset.GetConfigMapSetReloadSidecarRestartKey(cms.Name)
+
+	reloadSidecarRestartKey := configmapset.GetConfigMapSetReloadSidecarRestartKey(cms.Name)
 
 	if pod.Annotations == nil {
 		pod.Annotations = make(map[string]string)
 	}
 
 	now := time.Now().Format("2006-01-02 15:04:05")
+	pod.Annotations[targetRevisionKey] = cms.Status.CurrentRevision
+	pod.Annotations[currentRevisionKey] = cms.Status.CurrentRevision
+	pod.Annotations[targetCustomVersionKey] = cms.Status.CurrentCustomVersion
+	pod.Annotations[currentCustomVersionKey] = cms.Status.CurrentCustomVersion
+	pod.Annotations[currentRevisionTimestampKey] = now
+	pod.Annotations[updateRevisionTimestampKey] = now
+	pod.Annotations[reloadSidecarRestartKey] = cms.Status.CurrentRevision
 
-	// 方案一：永远注入稳定版本（CurrentRevision）。如果为空（首次发布），才注入目标版本。
-	if cms.Status.CurrentRevision != "" {
-		pod.Annotations[targetRevisionKey] = cms.Status.CurrentRevision
-		pod.Annotations[currentRevisionKey] = cms.Status.CurrentRevision
-		pod.Annotations[targetCustomVersionKey] = cms.Status.CurrentCustomVersion
-		pod.Annotations[currentCustomVersionKey] = cms.Status.CurrentCustomVersion
-
-		pod.Annotations[currentRevisionTimestampKey] = now
-		pod.Annotations[updateRevisionTimestampKey] = now
-	} else {
-		// If there is no current revision (first rollout), force new version
-		pod.Annotations[targetRevisionKey] = updateRevision
-		pod.Annotations[currentRevisionKey] = updateRevision
-		pod.Annotations[targetCustomVersionKey] = cms.Spec.CustomVersion
-		pod.Annotations[currentCustomVersionKey] = cms.Spec.CustomVersion
-
-		pod.Annotations[currentRevisionTimestampKey] = now
-		pod.Annotations[updateRevisionTimestampKey] = now
-	}
-
-	if pod.Annotations[restartKey] == "" {
-		// 初始化时使用 md5(pod.Name + "0")，与 Controller 逻辑保持结构一致
-		// 由于 mutating 阶段 Pod Name 可能还未分配（例如通过 GenerateName 创建），如果为空则使用固定值或 "0" 的 md5
-		podNameForHash := pod.Name
-		if podNameForHash == "" {
-			podNameForHash = "unnamed"
-		}
-		hashBytes := md5.Sum([]byte(podNameForHash + pod.Annotations[targetRevisionKey]))
-		hashStr := hex.EncodeToString(hashBytes[:])
-		pod.Annotations[restartKey] = hashStr
+	for _, container := range cms.Spec.Containers {
+		containerRestartKey := configmapset.GetConfigMapSetContainerRestartKey(cms.Name, container.Name)
+		pod.Annotations[containerRestartKey] = cms.Status.CurrentRevision
 	}
 
 	return nil

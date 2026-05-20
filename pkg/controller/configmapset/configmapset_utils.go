@@ -19,6 +19,8 @@ package configmapset
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -80,6 +82,12 @@ func GetConfigMapSetCurrentCustomVersionKey(cmsName string) string {
 
 func GetConfigMapSetReloadSidecarRestartKey(cmsName string) string {
 	return fmt.Sprintf("apps.kruise.io/configmapset-%s-reload-sidecar-restart", cmsName)
+}
+
+func GetContainerHash(pod *corev1.Pod, revision string) string {
+	podNameForHash := pod.Name
+	hashBytes := md5.Sum([]byte(podNameForHash + revision))
+	return hex.EncodeToString(hashBytes[:])
 }
 
 func GetConfigMapSetContainerRestartKey(cmsName, containerName string) string {

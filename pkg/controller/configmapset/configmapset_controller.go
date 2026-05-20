@@ -18,7 +18,6 @@ limitations under the License.
 package configmapset
 
 import (
-	"bytes"
 	"context"
 	"crypto/md5"
 	"crypto/sha256"
@@ -26,14 +25,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"k8s.io/utils/ptr"
 	"math"
-	"net"
-	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"k8s.io/utils/ptr"
 
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
@@ -41,13 +39,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/client-go/kubernetes"
-	corev1scheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/controller"
@@ -637,146 +631,6 @@ func getUpdatePodsByDistributions(cms *appsv1alpha1.ConfigMapSet, distributions 
 	return podsToUpdate, targetRevisions, targetCustomVersions
 }
 
-// execInContainer executes a command in the specified pod and container
-func (r *ReconcileConfigMapSet) execInContainer(ctx context.Context, pod *corev1.Pod, containerName string, cmd []string) (string, string, error) {
-	clientset, err := kubernetes.NewForConfig(r.config)
-	if err != nil {
-		return "", "", err
-	}
-
-	req := clientset.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Name(pod.Name).
-		Namespace(pod.Namespace).
-		SubResource("exec").
-		VersionedParams(&corev1.PodExecOptions{
-			Container: containerName,
-			Command:   cmd,
-			Stdin:     false,
-			Stdout:    true,
-			Stderr:    true,
-			TTY:       false,
-		}, corev1scheme.ParameterCodec)
-
-	exec, err := remotecommand.NewSPDYExecutor(r.config, "POST", req.URL())
-	if err != nil {
-		return "", "", err
-	}
-
-	var stdout, stderr bytes.Buffer
-	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: &stdout,
-		Stderr: &stderr,
-		Tty:    false,
-	})
-
-	return stdout.String(), stderr.String(), err
-}
-
-func (r *ReconcileConfigMapSet) verifySharedVolumeUpdated(ctx context.Context, pod *corev1.Pod, cms *appsv1alpha1.ConfigMapSet) error {
-	containerName := r.getReloadSidecarName(ctx, cms)
-	configMountPath := GetConfigMapSetConfigMountPath(cms.Name)
-
-	for key, expectedVal := range cms.Spec.Data {
-		cmd := []string{"cat", fmt.Sprintf("%s/%s", configMountPath, key)}
-		stdout, _, err := r.execInContainer(ctx, pod, containerName, cmd)
-		if err != nil {
-			return fmt.Errorf("failed to exec cat %s: %v", key, err)
-		}
-
-		if stdout != expectedVal {
-			return fmt.Errorf("file %s content does not match expected", key)
-		}
-	}
-	return nil
-}
-
-func (r *ReconcileConfigMapSet) resolvePort(pod *corev1.Pod, containerName string, port intstr.IntOrString) (int, error) {
-	if port.Type == intstr.Int {
-		return port.IntValue(), nil
-	}
-	for _, c := range pod.Spec.Containers {
-		if c.Name == containerName {
-			for _, p := range c.Ports {
-				if p.Name == port.StrVal {
-					return int(p.ContainerPort), nil
-				}
-			}
-		}
-	}
-	return 0, fmt.Errorf("port %s not found in container %s", port.StrVal, containerName)
-}
-
-func (r *ReconcileConfigMapSet) executePostHook(ctx context.Context, pod *corev1.Pod, cms *appsv1alpha1.ConfigMapSet) error {
-	if cms.Spec.EffectPolicy == nil || cms.Spec.EffectPolicy.PostHook == nil {
-		return nil
-	}
-
-	hook := cms.Spec.EffectPolicy.PostHook
-
-	if len(cms.Spec.Containers) == 0 {
-		return fmt.Errorf("no business containers defined in ConfigMapSet")
-	}
-
-	for _, containerSpec := range cms.Spec.Containers {
-		containerName := GetContainerName(pod, containerSpec)
-		if containerName == "" {
-			klog.Warningf("Pod %s/%s cannot determine container name from spec %v in executePostHook, skipping", pod.Namespace, pod.Name, containerSpec)
-			continue
-		}
-
-		if hook.HTTPGet != nil {
-			port, err := r.resolvePort(pod, containerName, hook.HTTPGet.Port)
-			if err != nil {
-				return err
-			}
-
-			scheme := string(hook.HTTPGet.Scheme)
-			if scheme == "" {
-				scheme = "http"
-			}
-
-			url := fmt.Sprintf("%s://%s:%d%s", strings.ToLower(scheme), pod.Status.PodIP, port, hook.HTTPGet.Path)
-
-			httpClient := &http.Client{Timeout: 5 * time.Second}
-			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-			if err != nil {
-				return err
-			}
-
-			for _, h := range hook.HTTPGet.HTTPHeaders {
-				req.Header.Add(h.Name, h.Value)
-			}
-
-			resp, err := httpClient.Do(req)
-			if err != nil {
-				return fmt.Errorf("http get failed for container %s: %v", containerName, err)
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-				return fmt.Errorf("http get returned status code %d for container %s", resp.StatusCode, containerName)
-			}
-		}
-
-		if hook.TCPSocket != nil {
-			port, err := r.resolvePort(pod, containerName, hook.TCPSocket.Port)
-			if err != nil {
-				return err
-			}
-
-			address := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(int(port)))
-			conn, err := net.DialTimeout("tcp", address, 5*time.Second)
-			if err != nil {
-				return fmt.Errorf("tcp socket failed for container %s: %v", containerName, err)
-			}
-			conn.Close()
-		}
-	}
-
-	return nil
-}
-
 func (r *ReconcileConfigMapSet) getReloadSidecarName(ctx context.Context, cms *appsv1alpha1.ConfigMapSet) string {
 	expectedSidecarName := fmt.Sprintf("%s-%s", strings.ToLower(cms.Name), "reload-sidecar")
 	if cms.Spec.ReloadSidecarConfig != nil {
@@ -863,25 +717,19 @@ func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *a
 					if latestPod.Labels == nil {
 						latestPod.Labels = make(map[string]string)
 					}
-					podNameForHash := latestPod.Name
-					if podNameForHash == "" {
-						podNameForHash = "unnamed"
-					}
-					hashBytes := md5.Sum([]byte(podNameForHash + targetRevision))
-					hashStr := hex.EncodeToString(hashBytes[:])
 
 					reloadSidecarName := r.getReloadSidecarName(ctx, cms)
 					needRestart := false
-					restartKey := GetConfigMapSetReloadSidecarRestartKey(cms.Name)
-
-					if latestPod.Annotations[restartKey] != hashStr {
-						latestPod.Annotations[restartKey] = hashStr
+					reloadSidecarRestartKey := GetConfigMapSetReloadSidecarRestartKey(cms.Name)
+					expectHash := GetContainerHash(latestPod, targetRevision)
+					if latestPod.Annotations[reloadSidecarRestartKey] != expectHash {
+						latestPod.Annotations[reloadSidecarRestartKey] = expectHash
 						needRestart = true
 					}
 
 					if needRestart {
 						klog.Infof("Triggering reload-sidecar container inplace-update for Pod %s/%s to revision %s", latestPod.Namespace, latestPod.Name, targetRevision)
-						err = r.rebootSidecarByCrr(latestPod, reloadSidecarName, hashStr)
+						err = r.rebootSidecarByCrr(latestPod, reloadSidecarName, expectHash)
 						if err != nil {
 							return err
 						}
@@ -893,7 +741,7 @@ func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *a
 					}
 
 					// wait reload-sidecar reboot success
-					err = r.waitSidecarRebootByCrrSuccess(ctx, latestPod, reloadSidecarName, hashStr)
+					err = r.waitSidecarRebootByCrrSuccess(ctx, latestPod, reloadSidecarName, expectHash)
 					if err != nil {
 						klog.Errorf("Pod %s/%s reload-sidecar (%s) is not rebooted yet because of %s, waiting...", latestPod.Namespace, latestPod.Name, reloadSidecarName, err.Error())
 						return err
@@ -915,12 +763,6 @@ func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *a
 						return nil
 					}
 
-					if err = r.verifySharedVolumeUpdated(ctx, latestPod, cms); err != nil {
-						klog.Infof("Pod %s/%s verify shared volume failed: %v, waiting...", latestPod.Namespace, latestPod.Name, err)
-						requeue = true
-						return nil
-					}
-
 					rebootContainerNames := []string{}
 					for _, c := range cms.Spec.Containers {
 						cName := GetContainerName(latestPod, c)
@@ -929,8 +771,8 @@ func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *a
 							continue
 						}
 						annotationKey := GetConfigMapSetContainerRestartKey(cms.Name, cName)
-						if latestPod.Annotations[annotationKey] != hashStr {
-							latestPod.Annotations[annotationKey] = hashStr
+						if latestPod.Annotations[annotationKey] != expectHash {
+							latestPod.Annotations[annotationKey] = expectHash
 							rebootContainerNames = append(rebootContainerNames, cName)
 							needRestart = true
 						}
@@ -938,7 +780,7 @@ func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *a
 
 					if needRestart {
 						klog.Infof("Triggering business container inplace-update for Pod %s/%s to revision %s", latestPod.Namespace, latestPod.Name, targetRevision)
-						err = r.rebootSidecarsByCrr(latestPod, rebootContainerNames, hashStr)
+						err = r.rebootSidecarsByCrr(latestPod, rebootContainerNames, expectHash)
 						if err != nil {
 							return err
 						}
@@ -950,7 +792,7 @@ func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *a
 					}
 
 					// wait business-sidecar reboot success
-					err = r.waitSidecarsRebootByCrrSuccess(ctx, latestPod, rebootContainerNames, hashStr)
+					err = r.waitSidecarsRebootByCrrSuccess(ctx, latestPod, rebootContainerNames, expectHash)
 					if err != nil {
 						klog.Infof("Pod %s/%s business-sidecars (%v) is not rebooted yet, waiting...", latestPod.Namespace, latestPod.Name, rebootContainerNames)
 						requeue = true
@@ -970,12 +812,6 @@ func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *a
 					}
 					if !isReloadSidecarReady {
 						klog.Infof("Pod %s/%s reload-sidecar (%s) is not ready yet, waiting...", latestPod.Namespace, latestPod.Name, expectedSidecarName)
-						requeue = true
-						return nil
-					}
-
-					if err = r.verifySharedVolumeUpdated(ctx, latestPod, cms); err != nil {
-						klog.Infof("Pod %s/%s verify shared volume failed: %v, waiting...", latestPod.Namespace, latestPod.Name, err)
 						requeue = true
 						return nil
 					}
@@ -1032,18 +868,6 @@ func (r *ReconcileConfigMapSet) UpdateByDistribution(ctx context.Context, cms *a
 					}
 					if !isReloadSidecarReady {
 						klog.Infof("Pod %s/%s reload-sidecar (%s) is not ready yet, waiting...", latestPod.Namespace, latestPod.Name, reloadSidecarName)
-						requeue = true
-						return nil
-					}
-
-					if err = r.verifySharedVolumeUpdated(ctx, latestPod, cms); err != nil {
-						klog.Infof("Pod %s/%s verify shared volume failed: %v, waiting...", latestPod.Namespace, latestPod.Name, err)
-						requeue = true
-						return nil
-					}
-
-					if err = r.executePostHook(ctx, latestPod, cms); err != nil {
-						klog.Infof("Pod %s/%s PostHook execution failed: %v, waiting...", latestPod.Namespace, latestPod.Name, err)
 						requeue = true
 						return nil
 					}
@@ -1333,7 +1157,7 @@ func (r *ReconcileConfigMapSet) rebootSidecarsByCrr(pod *corev1.Pod, containerNa
 				UnreadyGracePeriodSeconds: ptr.To[int64](5),
 				MinStartedSeconds:         int32(3),
 			},
-			ActiveDeadlineSeconds:   pointer.Int64(7200),
+			ActiveDeadlineSeconds:   pointer.Int64(14400),
 			TTLSecondsAfterFinished: pointer.Int32(3),
 		},
 	}
