@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	kubecontroller "k8s.io/kubernetes/pkg/controller"
@@ -188,20 +189,20 @@ func (h *PodCreateHandler) injectSidecar4Pod(ctx context.Context, pod *corev1.Po
 	}
 	// build downward api volume with reload-sidecar
 	podInfoVolume := corev1.Volume{
-		Name: "cms-podinfo",
+		Name: fmt.Sprintf("cms-%s-config", strings.ToLower(cms.Name)),
 		VolumeSource: corev1.VolumeSource{
 			DownwardAPI: &corev1.DownwardAPIVolumeSource{
 				Items: []corev1.DownwardAPIVolumeFile{
 					{
-						Path: "annotations",
+						Path: "target_revision",
 						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: "metadata.annotations",
+							FieldPath: fmt.Sprintf("metadata.annotations['%s']", configmapset.GetConfigMapSetUpdateRevisionKey(cms.Name)),
 						},
 					},
 					{
-						Path: "labels",
+						Path: "post_hook_config",
 						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: "metadata.labels",
+							FieldPath: fmt.Sprintf("metadata.annotations['%s']", configmapset.GetConfigMapSetPostHookConfigKey(cms.Name)),
 						},
 					},
 				},
@@ -215,7 +216,48 @@ func (h *PodCreateHandler) injectSidecar4Pod(ctx context.Context, pod *corev1.Po
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: volumeName, MountPath: configMountPath},
 			{Name: configMapVolume.Name, MountPath: configMapMountPath},
-			{Name: podInfoVolume.Name, MountPath: "/etc/podinfo"},
+			{Name: podInfoVolume.Name, MountPath: fmt.Sprintf("/etc/cms_config")},
+		},
+		ReadinessProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{
+						"sh",
+						"-c",
+						`
+TARGET_REVISION=$(cat /etc/cms_config/target_revision 2>/dev/null || true)
+if [ -z "$TARGET_REVISION" ]; then exit 0; fi
+
+# 1. 验证目标版本与本地标识是否一致（要求 sidecar 写入 .current_revision）
+# 这里保留对内容 hash 检查的兼容性。因为不同语言和系统环境下算出的 hash 算法差异较大，
+# 标准做法是：reload-sidecar 在将 configmap-hub 的对应版本文件拷贝到共享目录后，
+# 自行在共享目录下生成一个隐藏文件 '.current_revision' 记录已更新的 Hash 版本。
+if [ -f /etc/config/.current_revision ]; then
+    CURRENT_REVISION=$(cat /etc/config/.current_revision)
+    if [ "$TARGET_REVISION" != "$CURRENT_REVISION" ]; then
+        exit 1
+    fi
+else
+    # Fallback: 如果 sidecar 尚未实现该功能，执行基本的内容存在性校验
+    if [ ! -d /etc/config ]; then exit 1; fi
+fi
+
+# 2. 如果配置了 PostHook，检查成功标记
+POST_HOOK_CONFIG=$(cat /etc/cms_config/post_hook_config 2>/dev/null || true)
+if [ -n "$POST_HOOK_CONFIG" ] && [ "$POST_HOOK_CONFIG" != "null" ]; then
+    if [ ! -f "/etc/config/.post_hook_success_${TARGET_REVISION}" ]; then
+        exit 1
+    fi
+fi
+
+exit 0
+`,
+					},
+				},
+			},
+			InitialDelaySeconds: 1,
+			PeriodSeconds:       3,
+			TimeoutSeconds:      5,
 		},
 		Env: []corev1.EnvVar{{
 			Name:  configmapset.GetConfigMapSetEnvConfigPathName(cms.Name),
@@ -577,17 +619,34 @@ func (h *PodCreateHandler) handlePodRevisionAnnotations(ctx context.Context, pod
 	}
 
 	now := time.Now().Format("2006-01-02 15:04:05")
-	pod.Annotations[targetRevisionKey] = cms.Status.CurrentRevision
-	pod.Annotations[currentRevisionKey] = cms.Status.CurrentRevision
+
+	targetVersion := cms.Status.CurrentRevision
+	if targetVersion == "" {
+		hash, err := configmapset.CalculateHash(cms.Spec.Data)
+		if err == nil {
+			targetVersion = hash
+		}
+	}
+
+	pod.Annotations[targetRevisionKey] = targetVersion
+	pod.Annotations[currentRevisionKey] = targetVersion
 	pod.Annotations[targetCustomVersionKey] = cms.Status.CurrentCustomVersion
 	pod.Annotations[currentCustomVersionKey] = cms.Status.CurrentCustomVersion
 	pod.Annotations[currentRevisionTimestampKey] = now
 	pod.Annotations[updateRevisionTimestampKey] = now
-	pod.Annotations[reloadSidecarRestartKey] = cms.Status.CurrentRevision
+	pod.Annotations[reloadSidecarRestartKey] = targetVersion
 
 	for _, container := range cms.Spec.Containers {
 		containerRestartKey := configmapset.GetConfigMapSetContainerRestartKey(cms.Name, container.Name)
-		pod.Annotations[containerRestartKey] = cms.Status.CurrentRevision
+		pod.Annotations[containerRestartKey] = targetVersion
+	}
+
+	// 将 PostHook 配置注入到 Pod Annotations 中
+	if cms.Spec.EffectPolicy != nil && cms.Spec.EffectPolicy.Type == appsv1alpha1.EffectPolicyTypePostHook && cms.Spec.EffectPolicy.PostHook != nil {
+		hookConfigBytes, err := json.Marshal(cms.Spec.EffectPolicy.PostHook)
+		if err == nil {
+			pod.Annotations[configmapset.GetConfigMapSetPostHookConfigKey(cms.Name)] = string(hookConfigBytes)
+		}
 	}
 
 	return nil

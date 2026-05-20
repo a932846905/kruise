@@ -94,6 +94,10 @@ func GetConfigMapSetContainerRestartKey(cmsName, containerName string) string {
 	return fmt.Sprintf("apps.kruise.io/configmapset-%s-%s-restart", cmsName, containerName)
 }
 
+func GetConfigMapSetPostHookConfigKey(cmsName string) string {
+	return fmt.Sprintf("apps.kruise.io/configmapset-%s-post-hook-config", cmsName)
+}
+
 func GetConfigMapSetHubName(cmsName string) string {
 	return fmt.Sprintf("%s-hub", cmsName)
 }
