@@ -2518,13 +2518,25 @@ func (in *PostHookConfig) DeepCopyInto(out *PostHookConfig) {
 	*out = *in
 	if in.HTTPGet != nil {
 		in, out := &in.HTTPGet, &out.HTTPGet
-		*out = new(corev1.HTTPGetAction)
-		(*in).DeepCopyInto(*out)
+		*out = make([]*corev1.HTTPGetAction, len(*in))
+		for i := range *in {
+			if (*in)[i] != nil {
+				in, out := &(*in)[i], &(*out)[i]
+				*out = new(corev1.HTTPGetAction)
+				(*in).DeepCopyInto(*out)
+			}
+		}
 	}
 	if in.TCPSocket != nil {
 		in, out := &in.TCPSocket, &out.TCPSocket
-		*out = new(corev1.TCPSocketAction)
-		**out = **in
+		*out = make([]*corev1.TCPSocketAction, len(*in))
+		for i := range *in {
+			if (*in)[i] != nil {
+				in, out := &(*in)[i], &(*out)[i]
+				*out = new(corev1.TCPSocketAction)
+				**out = **in
+			}
+		}
 	}
 }
 

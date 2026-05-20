@@ -119,8 +119,8 @@ const (
 )
 
 type PostHookConfig struct {
-	HTTPGet   *corev1.HTTPGetAction   `json:"httpGet,omitempty"`
-	TCPSocket *corev1.TCPSocketAction `json:"tcpSocket,omitempty"`
+	HTTPGet   []*corev1.HTTPGetAction   `json:"httpGet,omitempty"`
+	TCPSocket []*corev1.TCPSocketAction `json:"tcpSocket,omitempty"`
 }
 
 type ConfigMapSetUpdateStrategy struct {

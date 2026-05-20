@@ -311,8 +311,8 @@ func TestValidateConfigMapSetSpec(t *testing.T) {
 				EffectPolicy: &appsv1alpha1.EffectPolicy{
 					Type: appsv1alpha1.EffectPolicyTypePostHook,
 					PostHook: &appsv1alpha1.PostHookConfig{
-						HTTPGet:   &corev1.HTTPGetAction{},
-						TCPSocket: &corev1.TCPSocketAction{},
+						HTTPGet:   []*corev1.HTTPGetAction{{}},
+						TCPSocket: []*corev1.TCPSocketAction{{}},
 					},
 				},
 				UpdateStrategy: &appsv1alpha1.ConfigMapSetUpdateStrategy{

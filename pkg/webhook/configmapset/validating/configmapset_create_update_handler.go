@@ -192,10 +192,10 @@ func (h *ConfigMapSetCreateUpdateHandler) validateConfigMapSetSpec(ctx context.C
 			if spec.EffectPolicy.PostHook == nil {
 				return field.Required(effectPath.Child("postHook"), "postHook must be specified when type is PostHook")
 			}
-			if spec.EffectPolicy.PostHook.HTTPGet == nil && spec.EffectPolicy.PostHook.TCPSocket == nil {
+			if len(spec.EffectPolicy.PostHook.HTTPGet) == 0 && len(spec.EffectPolicy.PostHook.TCPSocket) == 0 {
 				return field.Required(effectPath.Child("postHook"), "either httpGet or tcpSocket must be specified for PostHook")
 			}
-			if spec.EffectPolicy.PostHook.HTTPGet != nil && spec.EffectPolicy.PostHook.TCPSocket != nil {
+			if len(spec.EffectPolicy.PostHook.HTTPGet) > 0 && len(spec.EffectPolicy.PostHook.TCPSocket) > 0 {
 				return field.Invalid(effectPath.Child("postHook"), "", "cannot specify both httpGet and tcpSocket")
 			}
 		default:
