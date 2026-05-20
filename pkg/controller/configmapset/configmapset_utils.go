@@ -114,12 +114,12 @@ func GetConfigMapSetEnvRestartAnnotationName(cmsName string) string {
 	return fmt.Sprintf("CMS_%s_RESTART_ANNOTATION", strings.ToUpper(strings.ReplaceAll(cmsName, "-", "_")))
 }
 
-func GetConfigMapSetEnvConfigPathName(cmsName string) string {
-	return fmt.Sprintf("CMS_%s_CONFIG_PATH", strings.ToUpper(strings.ReplaceAll(cmsName, "-", "_")))
+func GetConfigMapSetEnvConfigPathName() string {
+	return "CMS_CONFIG_PATH"
 }
 
-func GetConfigMapSetEnvSharePathName(cmsName string) string {
-	return fmt.Sprintf("CMS_%s_SHARE_PATH", strings.ToUpper(strings.ReplaceAll(cmsName, "-", "_")))
+func GetConfigMapSetEnvSharePathName() string {
+	return "CMS_SHARE_PATH"
 }
 
 func GetConfigMapSetConfigMountPath(cmsName string) string {

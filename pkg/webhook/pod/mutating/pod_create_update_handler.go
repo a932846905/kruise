@@ -238,8 +238,7 @@ if [ -f /etc/config/.current_revision ]; then
         exit 1
     fi
 else
-    # Fallback: 如果 sidecar 尚未实现该功能，执行基本的内容存在性校验
-    if [ ! -d /etc/config ]; then exit 1; fi
+    exit 1
 fi
 
 # 2. 如果配置了 PostHook，检查成功标记
@@ -260,10 +259,10 @@ exit 0
 			TimeoutSeconds:      5,
 		},
 		Env: []corev1.EnvVar{{
-			Name:  configmapset.GetConfigMapSetEnvConfigPathName(cms.Name),
+			Name:  configmapset.GetConfigMapSetEnvConfigPathName(),
 			Value: configMapMountPath,
 		}, {
-			Name:  configmapset.GetConfigMapSetEnvSharePathName(cms.Name),
+			Name:  configmapset.GetConfigMapSetEnvSharePathName(),
 			Value: configMountPath,
 		}},
 	}
