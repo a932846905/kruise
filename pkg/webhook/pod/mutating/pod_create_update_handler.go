@@ -638,11 +638,12 @@ func (h *PodCreateHandler) handlePodRevisionAnnotations(ctx context.Context, pod
 	pod.Annotations[currentCustomVersionKey] = cms.Status.CurrentCustomVersion
 	pod.Annotations[currentRevisionTimestampKey] = now
 	pod.Annotations[updateRevisionTimestampKey] = now
-	pod.Annotations[reloadSidecarRestartKey] = targetVersion
 
+	expectHash := configmapset.GetContainerHash(pod, targetVersion)
+	pod.Annotations[reloadSidecarRestartKey] = expectHash
 	for _, container := range cms.Spec.Containers {
 		containerRestartKey := configmapset.GetConfigMapSetContainerRestartKey(cms.Name, container.Name)
-		pod.Annotations[containerRestartKey] = targetVersion
+		pod.Annotations[containerRestartKey] = expectHash
 	}
 
 	// Inject PostHook config into Pod Annotations
