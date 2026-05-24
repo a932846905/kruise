@@ -98,6 +98,11 @@ func GetConfigMapSetPostHookConfigKey(cmsName string) string {
 	return fmt.Sprintf("apps.kruise.io/configmapset-%s-post-hook-config", cmsName)
 }
 
+// GetConfigMapSetContainerStartedAtKey gets the container StartedAt annotation key for CRR
+func GetConfigMapSetContainerStartedAtKey(containerName string) string {
+	return fmt.Sprintf("configmapset.kruise.io/started-at-%s", containerName)
+}
+
 func GetConfigMapSetHubName(cmsName string) string {
 	return fmt.Sprintf("%s-hub", cmsName)
 }
